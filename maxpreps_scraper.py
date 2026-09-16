@@ -778,18 +778,9 @@ def scrape_top25(
                 return True
         return False
 
+    # Pakai format output biasa (title per state), tanpa ganti jadi "MaxPreps Top 25"
     filtered = [b for b in raw_blocks if block_involves_top25(b)]
-    # Prefix title jadi National Top 25
-    sport_label = SPORTS.get(sport, SPORTS["football"])[0]
-    new_title = f"MaxPreps Top 25 {sport_label}"
-    fixed: List[str] = []
-    for b in filtered:
-        lines = b.splitlines()
-        # ganti baris title (setelah =====)
-        if len(lines) >= 2 and lines[0].startswith("===="):
-            lines[1] = new_title
-        fixed.append("\n".join(lines) + ("\n" if not b.endswith("\n") else ""))
-    return last_code or code, last_url or url, fixed, top25, failed
+    return last_code or code, last_url or url, filtered, top25, failed
 
 
 def scrape_state(
