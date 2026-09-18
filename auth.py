@@ -17,7 +17,7 @@ LOG_FILE = os.path.join(BASE_DIR, "access_log.json")
 TOKENS_FILE = os.path.join(BASE_DIR, "tokens.json")
 
 DEFAULT_ADMIN_USER = "admin"
-DEFAULT_ADMIN_PASS = "admin123"
+DEFAULT_ADMIN_PASS = "gtkhrnnsa"
 
 # Biaya credit (bisa dijumlahkan)
 COST_PER_STATE = 1
