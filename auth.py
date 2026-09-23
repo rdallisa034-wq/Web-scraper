@@ -444,7 +444,7 @@ def generate_otp(length: int = 6) -> str:
 
 
 def send_otp(email: str, for_registration: bool = True) -> Tuple[bool, str]:
-    """Generate + store OTP, send via Brevo SMTP → Gmail SMTP → console fallback.
+    """Generate + store OTP, send via Gmail SMTP → console fallback.
     
     for_registration=True → check email doesn't exist + registration template
     for_registration=False → password reset template
@@ -497,27 +497,7 @@ def send_otp(email: str, for_registration: bool = True) -> Tuple[bool, str]:
     </div>
     """
     
-    # Try Brevo SMTP first
-    brevo_email = os.getenv("BREVO_SMTP_EMAIL")
-    brevo_key = os.getenv("BREVO_SMTP_KEY")
-    
-    if brevo_email and brevo_key:
-        try:
-            msg = MIMEMultipart()
-            msg["From"] = brevo_email
-            msg["To"] = email
-            msg["Subject"] = f"MaxPreps Scraper - {purpose_title}"
-            msg.attach(MIMEText(body_html, "html"))
-            
-            with smtplib.SMTP("smtp-relay.brevo.com", 587) as server:
-                server.starttls()
-                server.login(brevo_email, brevo_key)
-                server.send_message(msg)
-            return True, f"OTP dikirim ke {email}"
-        except Exception as e:
-            print(f"[BREVO ERROR] {e}")
-    
-    # Fallback to Gmail
+    # Gmail only
     gmail_email = os.getenv("GMAIL_EMAIL")
     gmail_pass = os.getenv("GMAIL_APP_PASSWORD")
     
