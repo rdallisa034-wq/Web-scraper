@@ -444,10 +444,10 @@ def generate_otp(length: int = 6) -> str:
 
 
 def send_otp(email: str, for_registration: bool = True) -> Tuple[bool, str]:
-    """Generate + store OTP, send via Gmail SMTP or console fallback.
+    """Generate + store OTP, send via Brevo SMTP → Gmail SMTP → console fallback.
     
-    for_registration=True → check email doesn't exist (registration flow)
-    for_registration=False → allow any email (password reset flow)
+    for_registration=True → check email doesn't exist + registration template
+    for_registration=False → password reset template
     """
     email = (email or "").strip().lower()
     if not email or "@" not in email:
@@ -474,7 +474,50 @@ def send_otp(email: str, for_registration: bool = True) -> Tuple[bool, str]:
     }
     _save_json(OTP_FILE, otp_data)
     
-    # Try Gmail SMTP
+    # Build email based on purpose
+    purpose_title = "Verifikasi Email - Daftar Akun" if for_registration else "Reset Password"
+    purpose_text = "Kode OTP untuk mendaftar akun MaxPreps Scraper:" if for_registration else "Kode OTP untuk mereset password MaxPreps Scraper:"
+    
+    body_html = f"""
+    <div style="font-family: Arial, sans-serif; background: #f5f5f5; padding: 20px;">
+      <div style="max-width: 500px; margin: 0 auto; background: white; border-radius: 8px; padding: 30px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+        <h2 style="color: #1f2937; margin-bottom: 24px; text-align: center;">🔐 {purpose_title}</h2>
+        <p style="color: #6b7280; font-size: 14px; margin-bottom: 20px;">Halo,</p>
+        <p style="color: #6b7280; font-size: 14px; margin-bottom: 30px;">{purpose_text}</p>
+        <div style="background: #f3f4f6; border-left: 4px solid #3b82f6; padding: 20px; margin-bottom: 30px; text-align: center;">
+          <span style="font-size: 32px; font-weight: bold; color: #1f2937; letter-spacing: 4px;">{otp}</span>
+        </div>
+        <p style="color: #ef4444; font-size: 12px; margin-bottom: 20px; text-align: center;">⏱️ Kode berlaku selama 5 menit</p>
+        <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 20px 0;">
+        <p style="color: #9ca3af; font-size: 12px; text-align: center;">
+          Jangan bagikan kode ini kepada siapapun.<br/>
+          MaxPreps Scraper Team
+        </p>
+      </div>
+    </div>
+    """
+    
+    # Try Brevo SMTP first
+    brevo_email = os.getenv("BREVO_SMTP_EMAIL")
+    brevo_key = os.getenv("BREVO_SMTP_KEY")
+    
+    if brevo_email and brevo_key:
+        try:
+            msg = MIMEMultipart()
+            msg["From"] = brevo_email
+            msg["To"] = email
+            msg["Subject"] = f"MaxPreps Scraper - {purpose_title}"
+            msg.attach(MIMEText(body_html, "html"))
+            
+            with smtplib.SMTP("smtp-relay.brevo.com", 587) as server:
+                server.starttls()
+                server.login(brevo_email, brevo_key)
+                server.send_message(msg)
+            return True, f"OTP dikirim ke {email}"
+        except Exception as e:
+            print(f"[BREVO ERROR] {e}")
+    
+    # Fallback to Gmail
     gmail_email = os.getenv("GMAIL_EMAIL")
     gmail_pass = os.getenv("GMAIL_APP_PASSWORD")
     
@@ -483,25 +526,7 @@ def send_otp(email: str, for_registration: bool = True) -> Tuple[bool, str]:
             msg = MIMEMultipart()
             msg["From"] = gmail_email
             msg["To"] = email
-            msg["Subject"] = "Kode OTP MaxPreps Scraper - 5 Menit"
-            body_html = f"""
-            <div style="font-family: Arial, sans-serif; background: #f5f5f5; padding: 20px;">
-              <div style="max-width: 500px; margin: 0 auto; background: white; border-radius: 8px; padding: 30px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
-                <h2 style="color: #1f2937; margin-bottom: 24px; text-align: center;">🔐 Verifikasi Email</h2>
-                <p style="color: #6b7280; font-size: 14px; margin-bottom: 20px;">Halo,</p>
-                <p style="color: #6b7280; font-size: 14px; margin-bottom: 30px;">Kode OTP Anda untuk MaxPreps Scraper:</p>
-                <div style="background: #f3f4f6; border-left: 4px solid #3b82f6; padding: 20px; margin-bottom: 30px; text-align: center;">
-                  <span style="font-size: 32px; font-weight: bold; color: #1f2937; letter-spacing: 4px;">{otp}</span>
-                </div>
-                <p style="color: #ef4444; font-size: 12px; margin-bottom: 20px; text-align: center;">⏱️ Kode berlaku selama 5 menit</p>
-                <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 20px 0;">
-                <p style="color: #9ca3af; font-size: 12px; text-align: center;">
-                  Jangan bagikan kode ini kepada siapapun.<br/>
-                  MaxPreps Scraper Team
-                </p>
-              </div>
-            </div>
-            """
+            msg["Subject"] = f"MaxPreps Scraper - {purpose_title}"
             msg.attach(MIMEText(body_html, "html"))
             
             with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
@@ -512,7 +537,7 @@ def send_otp(email: str, for_registration: bool = True) -> Tuple[bool, str]:
             print(f"[GMAIL ERROR] {e}")
     
     # Console fallback
-    print(f"[OTP] Email: {email} → Code: {otp}")
+    print(f"[OTP] Email: {email} → Code: {otp} (Purpose: {'Registration' if for_registration else 'Reset'})")
     return True, f"OTP dikirim ke {email} (dev mode)"
 
 
