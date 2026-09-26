@@ -800,6 +800,141 @@ def set_token_owner(token: str, username: str) -> Tuple[bool, str]:
     return True, f"Token ditetapkan ke {username}"
 
 
+# -------------------- OTP / email --------------------
+
+OTP_FILE = os.path.join(BASE_DIR, ".otp_temp.json")
+
+
+def generate_otp(length: int = 6) -> str:
+    return "".join(secrets.choice(string.digits) for _ in range(length))
+
+
+def send_otp(email: str, for_registration: bool = True) -> Tuple[bool, str]:
+    """Generate OTP, simpan sementara, kirim via Gmail SMTP (atau log di console)."""
+    email = (email or "").strip().lower()
+    if not email or "@" not in email:
+        return False, "Email tidak valid."
+
+    if for_registration:
+        if use_supabase() and _sb():
+            try:
+                exists = _sb().table("app_users").select("email").eq("email", email).execute()
+                if exists.data:
+                    return False, f"Email '{email}' sudah terdaftar."
+            except Exception:
+                pass
+        data = ensure_users_file()
+        users = data.get("users", {})
+        if email in users or any(
+            (v.get("email") or k) == email for k, v in users.items()
+        ):
+            return False, f"Email '{email}' sudah terdaftar."
+
+    otp = generate_otp()
+    otp_data = _load_json(OTP_FILE, {})
+    if not isinstance(otp_data, dict):
+        otp_data = {}
+    otp_data[email] = {
+        "code": otp,
+        "expires": (_now() + timedelta(minutes=5)).isoformat(),
+    }
+    _save_json(OTP_FILE, otp_data)
+
+    purpose = "Daftar akun" if for_registration else "Reset password"
+    body = (
+        f"MaxPreps Scraper — {purpose}\n\n"
+        f"Kode OTP: {otp}\n"
+        f"Berlaku 5 menit.\n"
+        f"Jangan bagikan kode ini."
+    )
+
+    gmail_email = _secrets_get("GMAIL_EMAIL") or os.getenv("GMAIL_EMAIL", "")
+    gmail_pass = _secrets_get("GMAIL_APP_PASSWORD") or os.getenv("GMAIL_APP_PASSWORD", "")
+    if gmail_email and gmail_pass:
+        try:
+            from email.mime.text import MIMEText
+            from email.mime.multipart import MIMEMultipart
+            import smtplib
+
+            msg = MIMEMultipart()
+            msg["From"] = gmail_email
+            msg["To"] = email
+            msg["Subject"] = f"MaxPreps Scraper - {purpose}"
+            msg.attach(MIMEText(body, "plain"))
+            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+                server.login(gmail_email, gmail_pass)
+                server.send_message(msg)
+            return True, f"OTP dikirim ke {email}"
+        except Exception as e:
+            print(f"[GMAIL ERROR] {e}")
+
+    print(f"[OTP] {email} → {otp} ({purpose})")
+    return True, f"OTP dikirim ke {email} (cek email / log server)"
+
+
+def verify_otp(email: str, otp: str) -> Tuple[bool, str]:
+    email = (email or "").strip().lower()
+    otp = (otp or "").strip()
+    otp_data = _load_json(OTP_FILE, {})
+    if not isinstance(otp_data, dict) or email not in otp_data:
+        return False, "OTP tidak ditemukan."
+    stored = otp_data[email]
+    try:
+        if _now() > datetime.fromisoformat(stored.get("expires", "")):
+            return False, "OTP kadaluarsa (5 menit)."
+    except Exception:
+        return False, "OTP kadaluarsa."
+    if stored.get("code") != otp:
+        return False, "OTP salah."
+    otp_data.pop(email, None)
+    _save_json(OTP_FILE, otp_data)
+    return True, "OTP valid."
+
+
+def update_password(email: str, new_password: str) -> Tuple[bool, str]:
+    """Update password (reset password flow)."""
+    email = (email or "").strip().lower()
+    if not email:
+        return False, "Email tidak valid."
+    if not new_password or len(new_password) < 4:
+        return False, "Password minimal 4 karakter."
+    salt = secrets.token_hex(8)
+    ph = _hash_password(new_password, salt)
+
+    if use_supabase() and _sb():
+        try:
+            r = _sb().table("app_users").select("email").eq("email", email).execute()
+            if not r.data:
+                r2 = _sb().table("app_users").select("username").eq("username", email).execute()
+                if not r2.data:
+                    return False, f"Akun '{email}' tidak ditemukan."
+                _sb().table("app_users").update(
+                    {"salt": salt, "password_hash": ph}
+                ).eq("username", email).execute()
+            else:
+                _sb().table("app_users").update(
+                    {"salt": salt, "password_hash": ph}
+                ).eq("email", email).execute()
+            return True, "Password berhasil diperbarui."
+        except Exception as e:
+            return False, f"DB error: {e}"
+
+    data = ensure_users_file()
+    users = data.get("users", {})
+    key = email if email in users else None
+    if not key:
+        for k, v in users.items():
+            if (v.get("email") or k) == email:
+                key = k
+                break
+    if not key:
+        return False, f"Akun '{email}' tidak ditemukan."
+    users[key]["salt"] = salt
+    users[key]["password_hash"] = ph
+    _save_json(USERS_FILE, data)
+    return True, "Password berhasil diperbarui."
+
+
 # -------------------- settings --------------------
 
 def get_settings() -> Dict[str, Any]:
