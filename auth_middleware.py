@@ -217,6 +217,7 @@ def _render_login_form() -> None:
                                 log_access(account.get("email", "?"), "register", "otp")
                                 st.success(msg)
                                 st.session_state.pop("otp_email_pending", None)
+                                st.session_state["open_token_after_register"] = True
                                 st.rerun()
                         else:
                             st.error(msg)

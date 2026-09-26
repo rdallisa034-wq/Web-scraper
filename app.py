@@ -37,6 +37,8 @@ from auth import (
     check_token_can_scrape,
     mark_token_used,
     set_token_owner,
+    suspend_user,
+    unsuspend_user,
     COST_PER_STATE,
     COST_ALL_STATES,
     COST_TOP25,
@@ -71,7 +73,7 @@ from maxpreps_scraper import (
     DEFAULT_GAME_WORKERS,
 )
 
-st.set_page_config(page_title="MaxPreps Scraper", page_icon="🏈", layout="centered")
+st.set_page_config(page_title="MaxPreps Scraper", page_icon="🏈", layout="wide", initial_sidebar_state="auto")
 
 # Pastikan file users ada
 ensure_users_file()
@@ -109,54 +111,86 @@ def _states():
     return o
 
 
+def _require_token_or_admin(user: Dict, is_admin: bool) -> bool:
+    """Gate scrape/edit: admin bypass, otherwise need token. Return True if OK."""
+    if is_admin:
+        return True
+    
+    if user.get("auth_type") != "token":
+        st.warning("⚠️ Anda belum memiliki token aktif.")
+        st.info("Untuk melanjutkan, silakan:")
+        col1, col2 = st.columns(2)
+        settings = get_settings()
+        
+        with col1:
+            if settings.get("subscribe_enabled"):
+                sub_link = buy_token_link(mode="subscribe")
+                if sub_link:
+                    st.link_button(
+                        f"💳 {settings.get('subscribe_text') or 'Berlangganan'}",
+                        sub_link,
+                        use_container_width=True,
+                    )
+        
+        with col2:
+            if settings.get("buy_token_enabled"):
+                buy_link = buy_token_link(mode="buy")
+                if buy_link:
+                    st.link_button(
+                        f"🛒 {settings.get('buy_token_text') or 'Beli token'}",
+                        buy_link,
+                        use_container_width=True,
+                    )
+        
+        st.info("Setelah beli/berlangganan, gunakan token di menu **Token** untuk melanjutkan.")
+        st.stop()
+        return False
+    
+    status, msg, _ = token_status(user.get("token", ""))
+    if status != "ok":
+        st.error(f"⚠️ {msg}")
+        if st.button("Ganti token", use_container_width=True):
+            st.rerun()
+        st.stop()
+        return False
+    
+    return True
+
+
 # ---- Auth middleware ----
 user = require_streamlit_auth()
 is_admin = user.get("role") == "admin"
 # sync legacy key used elsewhere
 st.session_state.auth_user = user
 
-# User biasa tanpa token → tampilan utama = form token
-has_token = user.get("auth_type") == "token" and bool(user.get("token"))
-needs_token = (not is_admin) and (not has_token)
-
 # ---- sidebar ----
 with st.sidebar:
     st.title("🏈 MaxPreps")
     st.markdown(f"**{user.get('display_name') or user.get('username', 'User')}**")
-    if has_token:
+    if user.get("auth_type") == "token":
         mode = user.get("token_mode") or "credit"
         if mode == "credit":
-            st.caption(f"Token credit · 💳 {user.get('credits', 0)}")
+            st.caption(f"💳 {user.get('credits', 0)} credit")
         else:
-            st.caption(f"Token waktu · valid s/d {user.get('expires_at') or '-'}")
+            st.caption(f"⏱️ s/d {user.get('expires_at') or '-'}")
     else:
         st.caption(f"@{user.get('username', '?')} · {user.get('role', 'user')}")
 
+    menu_opts = ["Scrape", "Edit file", "Token"]
     if is_admin:
-        menu_opts = ["Scrape", "Edit file", "Token", "Admin"]
-    elif has_token:
-        menu_opts = ["Scrape", "Edit file", "Token"]
-    else:
-        # User baru: Token dulu sebagai menu utama
-        menu_opts = ["Token", "Scrape", "Edit file"]
+        menu_opts.append("Admin")
+    default_menu = "Token" if st.session_state.pop("open_token_after_register", False) else "Scrape"
+    menu = st.radio("Menu", menu_opts, index=menu_opts.index(default_menu), label_visibility="collapsed")
 
-    default_idx = 0
-    if "menu_radio" not in st.session_state:
-        st.session_state.menu_radio = menu_opts[default_idx]
-    # Jika butuh token dan menu tersimpan invalid, reset
-    if st.session_state.get("menu_radio") not in menu_opts:
-        st.session_state.menu_radio = menu_opts[default_idx]
-
-    menu = st.radio("Menu", menu_opts, key="menu_radio", label_visibility="collapsed")
-
-    _s = get_settings()
-    _link = buy_token_link()
-    if _s.get("buy_token_enabled") and _link:
-        st.link_button(
-            f"🛒 {_s.get('buy_token_text') or 'Beli token'}",
-            _link,
-            use_container_width=True,
-        )
+    if user.get("auth_type") == "token":
+        _s = get_settings()
+        _link = buy_token_link()
+        if _s.get("buy_token_enabled") and _link:
+            st.link_button(
+                f"🛒 {_s.get('buy_token_text') or 'Beli token'}",
+                _link,
+                use_container_width=True,
+            )
 
     if st.button("Logout", use_container_width=True):
         logout_streamlit()
@@ -180,36 +214,82 @@ if menu == "Admin":
     with tab_users:
         st.subheader("Daftar user")
         users = list_users()
-        for u in users:
-            status = "✅ aktif" if u["active"] else "⛔ nonaktif"
+        for idx, u in enumerate(users):
+            suspended_until = u.get("suspended_until", "")
+            is_banned = u.get("active") is False and not suspended_until
+            
+            if suspended_until:
+                status = f"⏸️ ditangguhkan hingga {suspended_until}"
+            elif is_banned:
+                status = "🚫 di-banned"
+            else:
+                status = "✅ aktif" if u["active"] else "⛔ nonaktif"
+            
             st.markdown(
-                f"**{u['username']}** · {u['role']} · {status}  \n"
-                f"<small>dibuat {u['created_at'] or '-'} · login terakhir {u['last_login'] or '-'}</small>",
+                f"**{u.get('email') or u.get('username', '?')}** · {u['role']} · {status}  \n"
+                f"<small>dibuat {u['created_at'] or '-'} · login {u['last_login'] or '-'}</small>",
                 unsafe_allow_html=True,
             )
-            c1, c2, c3 = st.columns(3)
+            c1, c2, c3, c4, c5 = st.columns([1.5, 1.5, 1.5, 1.5, 1])
+            
             with c1:
-                if u["active"]:
-                    if st.button("Nonaktifkan", key=f"off_{u['username']}", use_container_width=True):
-                        ok, msg = set_user_active(u["username"], False)
-                        log_access(user["username"], "deactivate_user", u["username"])
+                if u["active"] and not suspended_until:
+                    if st.button("⏸ Off", key=f"off_{idx}_{u.get('email') or u.get('username')}", use_container_width=True):
+                        ok, msg = set_user_active(u.get('email') or u.get('username'), False)
+                        log_access(user.get("email", "?"), "deactivate_user", u.get('email') or u.get('username', '?'))
+                        st.toast(msg)
+                        st.rerun()
+                elif not u["active"] and not suspended_until:
+                    if st.button("▶ On", key=f"on_{idx}_{u.get('email') or u.get('username')}", use_container_width=True):
+                        ok, msg = set_user_active(u.get('email') or u.get('username'), True)
+                        log_access(user.get("email", "?"), "activate_user", u.get('email') or u.get('username', '?'))
+                        st.toast(msg)
+                        st.rerun()
+            
+            with c2:
+                if suspended_until:
+                    if st.button("✓ Pulihkan", key=f"unsuspend_{idx}_{u.get('email') or u.get('username')}", use_container_width=True):
+                        ok, msg = unsuspend_user(u.get('email') or u.get('username'))
+                        log_access(user.get("email", "?"), "unsuspend_user", u.get('email') or u.get('username', '?'))
                         st.toast(msg)
                         st.rerun()
                 else:
-                    if st.button("Aktifkan", key=f"on_{u['username']}", use_container_width=True):
-                        ok, msg = set_user_active(u["username"], True)
-                        log_access(user["username"], "activate_user", u["username"])
+                    if st.button("⏸ Suspend", key=f"suspend_{idx}_{u.get('email') or u.get('username')}", use_container_width=True):
+                        st.session_state[f"suspend_modal_{idx}"] = True
+            
+            with c3:
+                if is_banned:
+                    if st.button("✓ Buka Ban", key=f"unban_{idx}_{u.get('email') or u.get('username')}", use_container_width=True):
+                        ok, msg = set_user_active(u.get('email') or u.get('username'), True)
+                        log_access(user.get("email", "?"), "unban_user", u.get('email') or u.get('username', '?'))
                         st.toast(msg)
                         st.rerun()
-            with c2:
-                if st.button("Hapus", key=f"del_{u['username']}", use_container_width=True):
-                    ok, msg = delete_user(u["username"])
+                else:
+                    if st.button("🚫 Ban", key=f"ban_{idx}_{u.get('email') or u.get('username')}", use_container_width=True):
+                        ok, msg = set_user_active(u.get('email') or u.get('username'), False)
+                        log_access(user.get("email", "?"), "ban_user", u.get('email') or u.get('username', '?'))
+                        st.toast(msg)
+                        st.rerun()
+            
+            with c4:
+                if st.button("🗑 Hapus", key=f"del_{idx}_{u.get('email') or u.get('username')}", use_container_width=True):
+                    ok, msg = delete_user(u.get('email') or u.get('username'))
                     if ok:
-                        log_access(user["username"], "delete_user", u["username"])
+                        log_access(user.get("email", "?"), "delete_user", u.get('email') or u.get('username', '?'))
                     st.toast(msg)
                     st.rerun()
-            with c3:
-                pass
+            
+            # Suspend modal
+            if st.session_state.get(f"suspend_modal_{idx}"):
+                st.info(f"Tangguhkan akun {u.get('email') or u.get('username')}")
+                hours = st.number_input(f"Jam (hours)##sus_{idx}", min_value=1, max_value=720, value=24)
+                if st.button(f"✓ Tangguhkan {hours}h", key=f"do_suspend_{idx}", use_container_width=True):
+                    ok, msg = suspend_user(u.get('email') or u.get('username'), hours)
+                    log_access(user.get("email", "?"), "suspend_user", f"{u.get('email') or u.get('username', '?')} untuk {hours}h")
+                    st.toast(msg)
+                    st.session_state.pop(f"suspend_modal_{idx}", None)
+                    st.rerun()
+            
             st.divider()
 
         st.subheader("Tambah user")
@@ -222,7 +302,7 @@ if menu == "Admin":
         if submitted:
             ok, msg = add_user(nu, npw, role=nrole, display_name=ndn)
             if ok:
-                log_access(user["username"], "add_user", nu)
+                log_access(user.get("username", "?"), "add_user", nu)
                 st.success(msg)
                 st.rerun()
             else:
@@ -250,7 +330,6 @@ if menu == "Admin":
                 format_func=lambda m: "💳 Credit saja" if m == "credit" else "⏱️ Waktu saja (hari)",
                 horizontal=True,
             )
-            t_label = st.text_input("Label (opsional)", placeholder="client-A")
             t_credits = st.number_input("Credit (mode credit)", min_value=1, value=20, step=1)
             t_days = st.number_input(
                 "Berlaku berapa hari (mode waktu)",
@@ -261,14 +340,14 @@ if menu == "Admin":
         if t_go:
             if t_mode == "credit":
                 ok, msg, info = create_token(
-                    "credit", credits=int(t_credits), label=t_label, created_by=user["username"]
+                    "credit", credits=int(t_credits), created_by=user.get("username", "?")
                 )
             else:
                 ok, msg, info = create_token(
-                    "time", valid_days=float(t_days), label=t_label, created_by=user["username"]
+                    "time", valid_days=float(t_days), created_by=user.get("username", "?")
                 )
             if ok and info:
-                log_access(user["username"], "create_token", f"{info['mode']}:{info['token']}")
+                log_access(user.get("username", "?"), "create_token", f"{info['mode']}:{info['token']}")
                 st.success(msg)
                 st.code(info["token"], language=None)
                 if info["mode"] == "credit":
@@ -289,36 +368,40 @@ if menu == "Admin":
                 detail = f"💳 {t.get('credits',0)} / {t.get('credits_initial',0)} credit"
             else:
                 detail = f"⏱️ s/d {t.get('expires_at','-')}"
+            
+            # Tampilkan nama user atau "belum digunakan"
+            owner = t.get("token_owner") or "belum digunakan"
+            
             st.markdown(
-                f"**{t.get('label','token')}** · `{t['token']}`  \n"
-                f"Mode: **{mode}** · Status: **{t['status']}** · {detail} · pakai {t.get('use_count',0)}x  \n"
+                f"**{owner}** · `{t['token']}`  \n"
+                f"Mode: **{mode}** · Status: **{t['status']}** · {detail} · ×{t.get('use_count',0)}  \n"
                 f"<small>dibuat {t.get('created_at','')}</small>",
                 unsafe_allow_html=True,
             )
-            a1, a2, a3, a4 = st.columns(4)
-            with a1:
+            tcol1, tcol2, tcol3, tcol4 = st.columns([2, 2, 3, 2])
+            with tcol1:
                 if t.get("active") and t["status"] not in ("kadaluarsa",):
-                    if st.button("Nonaktif", key=f"toff_{t['token']}", use_container_width=True):
+                    if st.button("⏸ Off", key=f"toff_{t['token']}", use_container_width=True):
                         set_token_active(t["token"], False)
                         st.rerun()
                 else:
-                    if st.button("Aktifkan", key=f"ton_{t['token']}", use_container_width=True):
+                    if st.button("▶ On", key=f"ton_{t['token']}", use_container_width=True):
                         set_token_active(t["token"], True)
                         st.rerun()
-            with a2:
-                if st.button("Hapus", key=f"tdel_{t['token']}", use_container_width=True):
+            with tcol2:
+                if st.button("🗑 Hapus", key=f"tdel_{t['token']}", use_container_width=True):
                     delete_token(t["token"])
-                    log_access(user["username"], "delete_token", t["token"])
+                    log_access(user.get("username", "?"), "delete_token", t["token"])
                     st.rerun()
-            with a3:
+            with tcol3:
                 if mode == "credit":
                     add_c = st.number_input(
-                        "Tambah credit", min_value=1, value=10, step=1, key=f"taddn_{t['token']}"
+                        "Tambah", min_value=1, value=10, step=1, key=f"taddn_{t['token']}", label_visibility="collapsed"
                     )
                 else:
                     st.caption("Mode waktu")
                     add_c = 0
-            with a4:
+            with tcol4:
                 if mode == "credit" and st.button("+ Credit", key=f"tadd_{t['token']}", use_container_width=True):
                     ok, msg = add_token_credits(t["token"], int(add_c))
                     st.toast(msg)
@@ -332,9 +415,9 @@ if menu == "Admin":
             st.info("Belum ada log.")
         else:
             for row in logs:
-                st.text(
-                    f"{row.get('time','')}  |  {row.get('username','')}  |  "
-                    f"{row.get('action','')}  {row.get('detail','')}"
+                st.caption(
+                    f"{row.get('time','')} — {row.get('username','')} — "
+                    f"{row.get('action','')} {row.get('detail','')}"
                 )
 
     with tab_pw:
@@ -347,73 +430,96 @@ if menu == "Admin":
             if p1 != p2:
                 st.error("Password tidak sama.")
             else:
-                ok, msg = change_password(user["username"], p1)
+                ok, msg = change_password(user.get("username", "?"), p1)
                 if ok:
-                    log_access(user["username"], "change_password")
+                    log_access(user.get("username", "?"), "change_password")
                     st.success(msg)
                 else:
                     st.error(msg)
 
     with tab_set:
-        st.subheader("Tombol Beli token")
-        st.caption("Tampil di halaman login & saat token habis. Arahkan ke WhatsApp / halaman order.")
+        st.subheader("Konfigurasi Beli Token")
+        st.caption("Pengaturan tombol di halaman login & saat token habis.")
         s = get_settings()
-        with st.form("buy_settings_form"):
-            en = st.checkbox("Tampilkan tombol Beli token", value=bool(s.get("buy_token_enabled", True)))
-            label = st.text_input("Teks tombol", value=s.get("buy_token_text") or "Beli token")
-            url = st.text_input(
-                "Link (WhatsApp / URL)",
-                value=s.get("buy_token_url") or "https://wa.me/6281234567890",
-                help="Contoh: https://wa.me/6281234567890",
-            )
-            msg = st.text_area(
-                "Pesan default (untuk wa.me)",
-                value=s.get("buy_token_message") or "Halo admin, saya ingin beli token MaxPreps Scraper.",
-            )
-            save = st.form_submit_button("Simpan", type="primary")
-        if save:
-            ok, m = save_settings(
-                buy_token_enabled=en,
-                buy_token_text=label,
-                buy_token_url=url.strip(),
-                buy_token_message=msg.strip(),
-            )
-            st.success(m)
-            st.rerun()
+        
+        sub_col, buy_col = st.columns(2)
+        with sub_col:
+            st.markdown("**💳 Berlangganan / Buy**")
+            with st.form("subscribe_settings_form"):
+                en_sub = st.checkbox("Tampilkan tombol", value=bool(s.get("subscribe_enabled", False)))
+                label_sub = st.text_input("Teks tombol", value=s.get("subscribe_text") or "💳 Berlangganan", key="sub_text")
+                url_sub = st.text_input(
+                    "Link (WhatsApp / URL)",
+                    value=s.get("subscribe_url") or "https://wa.me/6281234567890",
+                    key="sub_url",
+                )
+                msg_sub = st.text_area(
+                    "Pesan default (wa.me)",
+                    value=s.get("subscribe_message") or "Halo admin, saya ingin berlangganan token MaxPreps Scraper.",
+                    key="sub_msg"
+                )
+                save_sub = st.form_submit_button("Simpan Subscribe", type="secondary", use_container_width=True)
+            if save_sub:
+                ok, m = save_settings(
+                    subscribe_enabled=en_sub,
+                    subscribe_text=label_sub,
+                    subscribe_url=url_sub.strip(),
+                    subscribe_message=msg_sub.strip(),
+                )
+                st.success(m)
+                st.rerun()
+
+        with buy_col:
+            st.markdown("**🛒 Beli Token (Sekali)**")
+            with st.form("buy_settings_form"):
+                en_buy = st.checkbox("Tampilkan tombol", value=bool(s.get("buy_token_enabled", True)), key="buy_check")
+                label_buy = st.text_input("Teks tombol", value=s.get("buy_token_text") or "🛒 Beli token", key="buy_text")
+                url_buy = st.text_input(
+                    "Link (WhatsApp / URL)",
+                    value=s.get("buy_token_url") or "https://wa.me/6281234567890",
+                    key="buy_url",
+                )
+                msg_buy = st.text_area(
+                    "Pesan default (wa.me)",
+                    value=s.get("buy_token_message") or "Halo admin, saya ingin beli token MaxPreps Scraper.",
+                    key="buy_msg"
+                )
+                save_buy = st.form_submit_button("Simpan Beli", type="secondary", use_container_width=True)
+            if save_buy:
+                ok, m = save_settings(
+                    buy_token_enabled=en_buy,
+                    buy_token_text=label_buy,
+                    buy_token_url=url_buy.strip(),
+                    buy_token_message=msg_buy.strip(),
+                )
+                st.success(m)
+                st.rerun()
+        
+        st.divider()
         st.markdown("**Preview link:**")
-        st.code(buy_token_link() or "(kosong)", language=None)
+        prev_col1, prev_col2 = st.columns(2)
+        with prev_col1:
+            st.caption("Subscribe link:")
+            st.code(buy_token_link(mode="subscribe") or "(kosong)", language=None)
+        with prev_col2:
+            st.caption("Buy link:")
+            st.code(buy_token_link(mode="buy") or "(kosong)", language=None)
 
     st.stop()
 
 
-# ===================== TOKEN (utama untuk user baru) =====================
-if menu == "Token":
+# ===================== TOKEN =====================
+elif menu == "Token":
     st.header("🎫 Masukkan Token")
-    st.caption("Setelah daftar, aktifkan akses dengan memasukkan token dari admin.")
-
-    if has_token:
-        st.success("Token aktif.")
-        mode = user.get("token_mode") or "credit"
-        if mode == "credit":
-            st.info(f"💳 **{user.get('credits', 0)}** credit tersisa")
-        else:
-            st.info(f"⏱️ Valid s/d **{user.get('expires_at') or '-'}**")
-        st.caption("Silakan buka menu **Scrape** untuk mulai.")
+    st.caption("Link token ke akun Anda untuk mulai scrape.")
+    
+    if user.get("auth_type") == "token":
+        st.info("✅ Anda sudah memiliki token aktif. Minta admin untuk mengganti token.")
     else:
-        st.warning("Anda belum memiliki token aktif.")
-        settings = get_settings()
-        link = buy_token_link()
-        if settings.get("buy_token_enabled") and link:
-            st.link_button(
-                f"🛒 {settings.get('buy_token_text') or 'Beli token'}",
-                link,
-                use_container_width=True,
-            )
-
         with st.form("token_input_form"):
             tok = st.text_input("Token akses", placeholder="MP-XXXXXXXX...")
             ok_tok = st.form_submit_button("Gunakan token", type="primary", use_container_width=True)
-
+        
         if ok_tok:
             tok = (tok or "").strip()
             if not tok:
@@ -421,54 +527,48 @@ if menu == "Token":
             else:
                 status, msg, tsess = token_status(tok)
                 if status == "ok" and tsess:
-                    owner_key = user.get("email") or user.get("username") or "?"
-                    ok_own, msg_own = set_token_owner(tok, owner_key)
+                    # Cek ownership — 1 token = 1 user
+                    ok_own, msg_own = set_token_owner(tok, user.get("username", "?"))
                     if not ok_own:
-                        log_access(owner_key, "add_token_failed", msg_own)
-                        st.error(msg_own)
+                        log_access(user.get("username", "?"), "add_token_failed", msg_own)
+                        st.error(f"❌ {msg_own}")
                     else:
-                        st.session_state.auth_user = {**user, **tsess}
-                        log_access(owner_key, "add_token", tok[:12])
-                        st.success("Token berhasil dipasang. Silakan scrape.")
-                        st.session_state.menu_radio = "Scrape"
+                        # Update session
+                        st.session_state.auth_user.update(tsess)
+                        log_access(user.get("username", "?"), "add_token", tok[:10])
+                        st.success(f"✅ Token berhasil digunakan!\n\n{msg}")
                         st.rerun()
                 else:
                     log_access(user.get("username", "?"), "add_token_failed", msg)
-                    st.error(msg or "Token tidak valid.")
-
-    st.stop()
+                    st.error(f"❌ {msg}")
+    
+    st.divider()
+    if user.get("auth_type") == "token":
+        st.subheader("Token saat ini")
+        mode = user.get("token_mode") or "credit"
+        if mode == "credit":
+            st.info(f"💳 {user.get('credits', 0)} credit tersisa")
+        else:
+            st.info(f"⏱️ Valid s/d {user.get('expires_at') or '-'}")
+    else:
+        st.info("Belum ada token. Masukkan token di form di atas.")
 
 
 # ===================== SCRAPE =====================
 if menu == "Scrape":
     st.header("Scrape jadwal")
-
-    if needs_token:
-        st.warning("Anda belum memiliki token aktif.")
-        st.info("Buka menu **Token** di sidebar, atau masukkan token di bawah.")
-        settings = get_settings()
-        link = buy_token_link()
-        if settings.get("buy_token_enabled") and link:
-            st.link_button(
-                f"🛒 {settings.get('buy_token_text') or 'Beli token'}",
-                link,
-                use_container_width=True,
-            )
-        if st.button("Ke menu Token", type="primary", use_container_width=True):
-            st.session_state.menu_radio = "Token"
-            st.rerun()
-        st.stop()
+    _require_token_or_admin(user, is_admin)
 
     st.subheader("1. Pilih sport & state")
-    a, b = st.columns(2)
+    col1, col2 = st.columns([1, 1])
     sports = _sports()
     states = _states()
-    with a:
-        sport = sports[st.selectbox("Sport", list(sports.keys()))]
-    with b:
+    with col1:
+        sport = sports[st.selectbox("Sport", list(sports.keys()), label_visibility="collapsed")]
+    with col2:
         keys = list(states.keys())
         idx = next((i for i, k in enumerate(keys) if states[k] == "tx"), 0)
-        state = states[st.selectbox("State", keys, index=idx)]
+        state = states[st.selectbox("State", keys, index=idx, label_visibility="collapsed")]
 
     watch_map = load_watch_map()
     watch = st.text_input(
@@ -602,12 +702,12 @@ if menu == "Scrape":
         if user.get("auth_type") == "token":
             cost = scrape_credit_cost(is_all=(state == "all"), top25_on=top25_on)
             mode = user.get("token_mode") or "credit"
-            ok_c, msg_c = check_token_can_scrape(user["token"], cost)
+            ok_c, msg_c = check_token_can_scrape(user.get("token"), cost)
             if not ok_c:
                 st.session_state.err = msg_c
                 st.error(msg_c)
                 st.stop()
-            pending_token_charge = (mode, user["token"], cost)
+            pending_token_charge = (mode, user.get("token"), cost)
         if watch:
             save_watch_link(watch, "default" if state == "all" else state, sport)
 
@@ -725,7 +825,7 @@ if menu == "Scrape":
                 f"Selesai: **{len(blocks)} match** → `{os.path.basename(dest)}`"
             )
             log_access(
-                user["username"],
+                user.get("username", "?"),
                 "scrape",
                 f"{tag}/{sport}/{mdy} → {len(blocks)} match",
             )
@@ -737,7 +837,7 @@ if menu == "Scrape":
                 if mode == "credit":
                     ok_d, msg_d, left = deduct_token_credits(tok, cost)
                     if ok_d:
-                        log_access(user["username"], "credit_deduct", f"-{cost} sisa={left}")
+                        log_access(user.get("username", "?"), "credit_deduct", f"-{cost} sisa={left}")
                         st.session_state.msg += f" · −{cost} credit (sisa {left})"
                         if left <= 0:
                             token_dead_after = (
@@ -753,7 +853,7 @@ if menu == "Scrape":
                         st.session_state.err = (st.session_state.err or "") + f" | Credit: {msg_d}"
                 else:
                     mark_token_used(tok)
-                    log_access(user["username"], "time_token_use", mdy)
+                    log_access(user.get("username", "?"), "time_token_use", mdy)
                     refreshed = refresh_token_session(tok)
                     if not refreshed:
                         token_dead_after = (
@@ -815,12 +915,8 @@ if menu == "Scrape":
 # ===================== EDIT =====================
 elif menu == "Edit file":
     st.header("Edit file")
-    if needs_token:
-        st.warning("Anda belum memiliki token aktif.")
-        if st.button("Ke menu Token", type="primary", use_container_width=True):
-            st.session_state.menu_radio = "Token"
-            st.rerun()
-        st.stop()
+    _require_token_or_admin(user, is_admin)
+
     files = []
     if os.path.isdir(TEMP_DIR):
         for n in sorted(os.listdir(TEMP_DIR)):
@@ -844,22 +940,22 @@ elif menu == "Edit file":
         if "ed_area" not in st.session_state:
             st.session_state.ed_area = open(path, encoding="utf-8").read()
 
-        c1, c2 = st.columns(2)
+        c1, c2 = st.columns([2, 2])
         with c1:
-            find = st.text_input("Cari", key="edit_find")
+            find = st.text_input("Cari", key="edit_find", label_visibility="collapsed", placeholder="Cari teks...")
         with c2:
-            repl = st.text_input("Ganti dengan", key="edit_repl")
+            repl = st.text_input("Ganti dengan", key="edit_repl", label_visibility="collapsed", placeholder="Teks baru...")
         case_sens = st.checkbox("Case sensitive", value=False, key="edit_case")
 
-        r1, r2, r3 = st.columns(3)
-        with r1:
+        btn1, btn2, btn3 = st.columns([2, 2, 2])
+        with btn1:
             do_replace = st.button(
                 "Replace all", type="primary", use_container_width=True
             )
-        with r2:
-            do_save = st.button("Simpan", use_container_width=True)
-        with r3:
-            do_reload = st.button("Reload", use_container_width=True)
+        with btn2:
+            do_save = st.button("💾 Simpan", use_container_width=True)
+        with btn3:
+            do_reload = st.button("🔄 Reload", use_container_width=True)
 
         if do_reload:
             st.session_state.ed_area = open(path, encoding="utf-8").read()
@@ -889,7 +985,7 @@ elif menu == "Edit file":
                     st.session_state.edit_msg = (
                         f"Replace all: {count} kemunculan diganti & disimpan."
                     )
-                    log_access(user["username"], "edit_replace", os.path.basename(path))
+                    log_access(user.get("username", "?"), "edit_replace", os.path.basename(path))
                 except Exception as ex:
                     st.session_state.edit_msg = f"Gagal simpan: {ex}"
                 st.rerun()
@@ -901,7 +997,7 @@ elif menu == "Edit file":
                     fh.write(text)
                 st.session_state.editor_text = text
                 st.session_state.edit_msg = f"Disimpan ({len(text)} karakter)."
-                log_access(user["username"], "edit_save", os.path.basename(path))
+                log_access(user.get("username", "?"), "edit_save", os.path.basename(path))
             except Exception as ex:
                 st.session_state.edit_msg = f"Gagal simpan: {ex}"
             st.rerun()
