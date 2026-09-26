@@ -13,9 +13,6 @@ import json
 import os
 import secrets
 import string
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -24,7 +21,6 @@ USERS_FILE = os.path.join(BASE_DIR, "users.json")
 LOG_FILE = os.path.join(BASE_DIR, "access_log.json")
 TOKENS_FILE = os.path.join(BASE_DIR, "tokens.json")
 SETTINGS_FILE = os.path.join(BASE_DIR, "settings.json")
-OTP_FILE = os.path.join(BASE_DIR, ".otp_temp.json")
 
 DEFAULT_ADMIN_USER = "admin"
 DEFAULT_ADMIN_PASS = "admin123"
@@ -126,29 +122,22 @@ def backend_name() -> str:
 # -------------------- users --------------------
 
 def _maybe_reset_admin_from_secrets() -> None:
-    """Auto-create or reset admin user (email-based lookup)."""
+    """Jika ADMIN_RESET_PASSWORD di secrets/env di-set, reset password admin."""
     new_pw = _secrets_get("ADMIN_RESET_PASSWORD", "")
     if not new_pw or len(new_pw) < 4:
         return
-    
     salt = secrets.token_hex(8)
     ph = _hash_password(new_pw, salt)
-    admin_email = "admin@local"
-    
     if use_supabase() and _sb():
         try:
             client = _sb()
-            # Check by email (new schema)
-            r = client.table("app_users").select("email").eq("email", admin_email).execute()
+            r = client.table("app_users").select("username").eq("username", DEFAULT_ADMIN_USER).execute()
             if r.data:
-                # Update existing
                 client.table("app_users").update(
                     {"salt": salt, "password_hash": ph, "active": True, "role": "admin"}
-                ).eq("email", admin_email).execute()
+                ).eq("username", DEFAULT_ADMIN_USER).execute()
             else:
-                # Create new
                 client.table("app_users").insert({
-                    "email": admin_email,
                     "username": DEFAULT_ADMIN_USER,
                     "salt": salt,
                     "password_hash": ph,
@@ -161,14 +150,11 @@ def _maybe_reset_admin_from_secrets() -> None:
         except Exception:
             pass
         return
-    
-    # JSON fallback
+    # JSON fallback — jangan panggil ensure_users_file (hindari rekursi)
     data = _load_json(USERS_FILE, None)
     if not isinstance(data, dict) or "users" not in data:
         data = {"users": {}}
-    data["users"][admin_email] = {
-        "email": admin_email,
-        "username": DEFAULT_ADMIN_USER,
+    data["users"][DEFAULT_ADMIN_USER] = {
         "salt": salt,
         "password_hash": ph,
         "role": "admin",
@@ -222,91 +208,22 @@ def ensure_users_file() -> Dict[str, Any]:
     return data
 
 
-def suspend_user(username: str, hours: int = 24) -> Tuple[bool, str]:
-    """Suspend user untuk hours, set suspended_until datetime."""
-    username = (username or "").strip().lower()
-    if not username or hours < 1:
-        return False, "Invalid username atau hours"
-    
-    is_email = "@" in username
-    suspend_until = _now() + timedelta(hours=hours)
-    suspend_until_str = suspend_until.strftime("%Y-%m-%d %H:%M:%S UTC")
-    
-    if use_supabase() and _sb():
-        try:
-            col = "email" if is_email else "username"
-            _sb().table("app_users").update({
-                "suspended_until": suspend_until_str
-            }).eq(col, username).execute()
-            return True, f"User {username} ditangguhkan hingga {suspend_until_str}"
-        except Exception as e:
-            return False, str(e)
-    
-    data = ensure_users_file()
-    users = data.get("users", {})
-    key = username if username in users else None
-    if not key:
-        for k, v in users.items():
-            if v.get("email") == username or k == username:
-                key = k
-                break
-    if not key:
-        return False, f"User {username} tidak ditemukan"
-    
-    data["users"][key]["suspended_until"] = suspend_until_str
-    _save_json(USERS_FILE, data)
-    return True, f"User {username} ditangguhkan hingga {suspend_until_str}"
-
-
-def unsuspend_user(username: str) -> Tuple[bool, str]:
-    """Clear suspended_until, restore user."""
-    username = (username or "").strip().lower()
-    is_email = "@" in username
-    
-    if use_supabase() and _sb():
-        try:
-            col = "email" if is_email else "username"
-            _sb().table("app_users").update({
-                "suspended_until": None
-            }).eq(col, username).execute()
-            return True, f"User {username} dipulihkan"
-        except Exception as e:
-            return False, str(e)
-    
-    data = ensure_users_file()
-    users = data.get("users", {})
-    key = username if username in users else None
-    if not key:
-        for k, v in users.items():
-            if v.get("email") == username or k == username:
-                key = k
-                break
-    if not key:
-        return False, f"User {username} tidak ditemukan"
-    
-    data["users"][key].pop("suspended_until", None)
-    _save_json(USERS_FILE, data)
-    return True, f"User {username} dipulihkan"
-
-
 def list_users() -> List[Dict[str, Any]]:
     ensure_users_file()
     if use_supabase() and _sb():
         try:
             r = _sb().table("app_users").select(
-                "email,username,role,active,created_at,display_name,last_login,suspended_until"
+                "username,role,active,created_at,display_name,last_login"
             ).execute()
             out = []
             for row in r.data or []:
                 out.append({
-                    "username": row.get("username") or row.get("email", "?"),
-                    "email": row.get("email", ""),
+                    "username": row["username"],
                     "role": row.get("role", "user"),
                     "active": bool(row.get("active", True)),
                     "created_at": row.get("created_at") or "",
-                    "display_name": row.get("display_name") or row.get("email", "?"),
+                    "display_name": row.get("display_name") or row["username"],
                     "last_login": row.get("last_login") or "",
-                    "suspended_until": row.get("suspended_until") or "",
                 })
             out.sort(key=lambda u: (0 if u["role"] == "admin" else 1, u["username"]))
             return out
@@ -318,21 +235,19 @@ def list_users() -> List[Dict[str, Any]]:
     for username, info in data.get("users", {}).items():
         out.append({
             "username": username,
-            "email": info.get("email") or username,
             "role": info.get("role", "user"),
             "active": bool(info.get("active", True)),
             "created_at": info.get("created_at", ""),
             "display_name": info.get("display_name") or username,
             "last_login": info.get("last_login", ""),
-            "suspended_until": info.get("suspended_until", ""),
         })
     out.sort(key=lambda u: (0 if u["role"] == "admin" else 1, u["username"]))
     return out
 
 
-def verify_login(email_or_username: str, password: str) -> Optional[Dict[str, Any]]:
-    identifier = (email_or_username or "").strip().lower()
-    if not identifier or not password:
+def verify_login(username: str, password: str) -> Optional[Dict[str, Any]]:
+    username = (username or "").strip().lower()
+    if not username or not password:
         return None
     ensure_users_file()
 
@@ -341,250 +256,53 @@ def verify_login(email_or_username: str, password: str) -> Optional[Dict[str, An
 
     if use_supabase() and _sb():
         try:
-            # Try email first, then username for backward compat
-            r = _sb().table("app_users").select("*").eq("email", identifier).limit(1).execute()
-            if not r.data:
-                r = _sb().table("app_users").select("*").eq("username", identifier).limit(1).execute()
+            r = _sb().table("app_users").select("*").eq("username", username).limit(1).execute()
             if not r.data:
                 return None
             info = r.data[0]
-            
+            # active bisa None / True
+            if info.get("active") is False:
+                return None
             salt = info.get("salt") or ""
             if _hash_password(password, salt) != (info.get("password_hash") or ""):
                 return None
-            
-            # Cek suspended
-            susp_until_str = info.get("suspended_until") or ""
-            if susp_until_str:
-                try:
-                    susp_until = datetime.fromisoformat(susp_until_str.replace(" UTC", "+00:00"))
-                    if _now() < susp_until:
-                        return {"error": "suspended", "message": f"Akun ditangguhkan hingga {susp_until_str}"}
-                except Exception:
-                    pass
-            
-            # Cek banned (active=false tanpa suspended_until)
-            if info.get("active") is False and not susp_until_str:
-                return {"error": "banned", "message": "Akun di-banned."}
-            
             try:
-                _sb().table("app_users").update({"last_login": _now_iso()}).eq("email", identifier).execute()
+                _sb().table("app_users").update({"last_login": _now_iso()}).eq("username", username).execute()
             except Exception:
                 pass
-            
-            account = {
-                "email": info.get("email") or identifier,
-                "username": info.get("username") or identifier,
+            return {
+                "username": username,
                 "role": info.get("role") or "user",
-                "display_name": info.get("display_name") or identifier,
+                "display_name": info.get("display_name") or username,
                 "auth_type": "password",
             }
-            
-            # Cek token owner
-            try:
-                tok_r = _sb().table("app_tokens").select("*").eq("token_owner", identifier).limit(1).execute()
-                if tok_r.data:
-                    tok_info = tok_r.data[0]
-                    account.update(_token_session_dict(tok_info["token"], tok_info))
-            except Exception:
-                pass
-            
-            return account
         except Exception:
+            # fallback JSON jika DB error
             pass
 
     data = ensure_users_file()
-    # Try email first, then username for backward compat
-    info = data.get("users", {}).get(identifier)
-    if not info:
+    info = data.get("users", {}).get(username)
+    if not info or info.get("active") is False:
         return None
-    
     if _hash_password(password, info.get("salt") or "") != info.get("password_hash"):
         return None
-    
-    # Cek suspended
-    susp_until_str = info.get("suspended_until") or ""
-    if susp_until_str:
-        try:
-            susp_until = datetime.fromisoformat(susp_until_str.replace(" UTC", "+00:00"))
-            if _now() < susp_until:
-                return {"error": "suspended", "message": f"Akun ditangguhkan hingga {susp_until_str}"}
-        except Exception:
-            pass
-    
-    # Cek banned
-    if info.get("active") is False and not susp_until_str:
-        return {"error": "banned", "message": "Akun di-banned."}
-    
     info["last_login"] = _now_iso()
-    data["users"][identifier] = info
+    data["users"][username] = info
     _save_json(USERS_FILE, data)
-    
-    account = {
-        "email": info.get("email") or identifier,
-        "username": info.get("username") or identifier,
+    return {
+        "username": username,
         "role": info.get("role", "user"),
-        "display_name": info.get("display_name") or identifier,
+        "display_name": info.get("display_name") or username,
         "auth_type": "password",
     }
-    
-    # Cek token owner di JSON
-    tok_data = ensure_tokens_file()
-    for tok, tok_info in tok_data.get("tokens", {}).items():
-        if tok_info.get("token_owner") == identifier:
-            account.update(_token_session_dict(tok, tok_info))
-            break
-    
-    return account
 
 
-def generate_otp(length: int = 6) -> str:
-    """Generate random OTP."""
-    return "".join(secrets.choice(string.digits) for _ in range(length))
-
-
-def send_otp(email: str, for_registration: bool = True) -> Tuple[bool, str]:
-    """Generate + store OTP, send via Gmail SMTP → console fallback.
-    
-    for_registration=True → check email doesn't exist + registration template
-    for_registration=False → password reset template
-    """
-    email = (email or "").strip().lower()
-    if not email or "@" not in email:
-        return False, "Email tidak valid."
-    
-    # Check duplicate only for registration
-    if for_registration:
-        if use_supabase() and _sb():
-            try:
-                exists = _sb().table("app_users").select("email").eq("email", email).execute()
-                if exists.data:
-                    return False, f"Email '{email}' sudah terdaftar."
-            except Exception:
-                pass
-        data = ensure_users_file()
-        if email in data.get("users", {}):
-            return False, f"Email '{email}' sudah terdaftar."
-    
-    otp = generate_otp()
-    otp_data = _load_json(OTP_FILE, {})
-    otp_data[email] = {
-        "code": otp,
-        "expires": (_now() + timedelta(minutes=5)).isoformat()
-    }
-    _save_json(OTP_FILE, otp_data)
-    
-    # Build email based on purpose
-    purpose_title = "Verifikasi Email - Daftar Akun" if for_registration else "Reset Password"
-    purpose_text = "Kode OTP untuk mendaftar akun MaxPreps Scraper:" if for_registration else "Kode OTP untuk mereset password MaxPreps Scraper:"
-    
-    body_html = f"""
-    <div style="font-family: Arial, sans-serif; background: #f5f5f5; padding: 20px;">
-      <div style="max-width: 500px; margin: 0 auto; background: white; border-radius: 8px; padding: 30px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
-        <h2 style="color: #1f2937; margin-bottom: 24px; text-align: center;">🔐 {purpose_title}</h2>
-        <p style="color: #6b7280; font-size: 14px; margin-bottom: 20px;">Halo,</p>
-        <p style="color: #6b7280; font-size: 14px; margin-bottom: 30px;">{purpose_text}</p>
-        <div style="background: #f3f4f6; border-left: 4px solid #3b82f6; padding: 20px; margin-bottom: 30px; text-align: center;">
-          <span style="font-size: 32px; font-weight: bold; color: #1f2937; letter-spacing: 4px;">{otp}</span>
-        </div>
-        <p style="color: #ef4444; font-size: 12px; margin-bottom: 20px; text-align: center;">⏱️ Kode berlaku selama 5 menit</p>
-        <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 20px 0;">
-        <p style="color: #9ca3af; font-size: 12px; text-align: center;">
-          Jangan bagikan kode ini kepada siapapun.<br/>
-          MaxPreps Scraper Team
-        </p>
-      </div>
-    </div>
-    """
-    
-    # Gmail only
-    gmail_email = os.getenv("GMAIL_EMAIL")
-    gmail_pass = os.getenv("GMAIL_APP_PASSWORD")
-    
-    if gmail_email and gmail_pass:
-        try:
-            msg = MIMEMultipart()
-            msg["From"] = gmail_email
-            msg["To"] = email
-            msg["Subject"] = f"MaxPreps Scraper - {purpose_title}"
-            msg.attach(MIMEText(body_html, "html"))
-            
-            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-                server.login(gmail_email, gmail_pass)
-                server.send_message(msg)
-            return True, f"OTP dikirim ke {email}"
-        except Exception as e:
-            print(f"[GMAIL ERROR] {e}")
-    
-    # Console fallback
-    print(f"[OTP] Email: {email} → Code: {otp} (Purpose: {'Registration' if for_registration else 'Reset'})")
-    return True, f"OTP dikirim ke {email} (dev mode)"
-
-
-def verify_otp(email: str, otp: str) -> Tuple[bool, str]:
-    """Verify OTP, return True if valid."""
-    email = email.lower()
-    otp_data = _load_json(OTP_FILE, {})
-    if email not in otp_data:
-        return False, "OTP tidak ditemukan"
-    
-    stored = otp_data[email]
-    try:
-        if _now() > datetime.fromisoformat(stored.get("expires", "")):
-            return False, "OTP kadaluarsa (5 menit)"
-    except Exception:
-        return False, "OTP kadaluarsa"
-    
-    if stored.get("code") != otp:
-        return False, "OTP salah"
-    
-    otp_data.pop(email, None)
-    _save_json(OTP_FILE, otp_data)
-    return True, "OTP valid"
-
-
-def update_password(email: str, new_password: str) -> Tuple[bool, str]:
-    """Update user password (for password reset flow)."""
-    email = (email or "").strip().lower()
-    if not email or "@" not in email:
-        return False, "Email tidak valid."
-    if len(new_password) < 4:
-        return False, "Password minimal 4 karakter."
-    
-    if use_supabase() and _sb():
-        try:
-            exists = _sb().table("app_users").select("email").eq("email", email).execute()
-            if not exists.data:
-                return False, f"Email '{email}' tidak terdaftar."
-            salt = secrets.token_hex(8)
-            _sb().table("app_users").update({
-                "salt": salt,
-                "password_hash": _hash_password(new_password, salt),
-                "last_login": _now_iso()
-            }).eq("email", email).execute()
-            return True, "Password berhasil diperbarui."
-        except Exception as e:
-            return False, f"DB error: {e}"
-    
-    data = ensure_users_file()
-    if email not in data.get("users", {}):
-        return False, f"Email '{email}' tidak terdaftar."
-    salt = secrets.token_hex(8)
-    data["users"][email].update({
-        "salt": salt,
-        "password_hash": _hash_password(new_password, salt),
-        "last_login": _now_iso()
-    })
-    _save_json(USERS_FILE, data)
-    return True, "Password berhasil diperbarui."
-
-
-def add_user(email: str, password: str, role: str = "user", display_name: str = "") -> Tuple[bool, str]:
-    email = (email or "").strip().lower()
-    if not email or not password:
-        return False, "Email dan password wajib diisi."
-    if "@" not in email:
-        return False, "Email tidak valid."
+def add_user(username: str, password: str, role: str = "user", display_name: str = "") -> Tuple[bool, str]:
+    username = (username or "").strip().lower()
+    if not username or not password:
+        return False, "Username dan password wajib diisi."
+    if len(username) < 3:
+        return False, "Username minimal 3 karakter."
     if len(password) < 4:
         return False, "Password minimal 4 karakter."
     if role not in ("admin", "user"):
@@ -592,59 +310,40 @@ def add_user(email: str, password: str, role: str = "user", display_name: str = 
     ensure_users_file()
     salt = secrets.token_hex(8)
     row = {
-        "email": email,
+        "username": username,
         "salt": salt,
         "password_hash": _hash_password(password, salt),
         "role": role,
         "created_at": _now_iso(),
         "active": True,
-        "display_name": display_name or email,
+        "display_name": display_name or username,
         "last_login": "",
     }
 
     if use_supabase() and _sb():
         try:
-            exists = _sb().table("app_users").select("email").eq("email", email).execute()
+            exists = _sb().table("app_users").select("username").eq("username", username).execute()
             if exists.data:
-                return False, f"Email '{email}' sudah terdaftar."
+                return False, f"Username '{username}' sudah ada."
             _sb().table("app_users").insert(row).execute()
-            return True, f"Akun '{email}' berhasil dibuat."
+            return True, f"User '{username}' ditambahkan."
         except Exception as e:
             return False, f"DB error: {e}"
 
     data = ensure_users_file()
-    if email in data.get("users", {}):
-        return False, f"Email '{email}' sudah terdaftar."
-    data["users"][email] = row
+    if username in data.get("users", {}):
+        return False, f"Username '{username}' sudah ada."
+    data["users"][username] = row
     _save_json(USERS_FILE, data)
-    return True, f"Akun '{email}' berhasil dibuat."
-
-
-def register_user_with_token(username: str, password: str, token_str: str = "", display_name: str = "") -> Tuple[bool, str, Optional[Dict[str, Any]]]:
-    """Register user baru (tanpa token di form, token masuk lewat dashboard nanti)."""
-    ok, msg = add_user(username, password, role="user", display_name=display_name or username)
-    if not ok:
-        return False, msg, None
-    
-    # Login user baru
-    account = verify_login(username, password)
-    if account:
-        log_access(username, "register", "")
-        return True, f"{msg}", account
-    
-    return False, "Register gagal.", None
+    return True, f"User '{username}' ditambahkan."
 
 
 def set_user_active(username: str, active: bool) -> Tuple[bool, str]:
     if username == DEFAULT_ADMIN_USER and not active:
         return False, "Admin default tidak bisa dinonaktifkan."
-    # Use email if input looks like email, else username
-    is_email = "@" in username
-    
     if use_supabase() and _sb():
         try:
-            col = "email" if is_email else "username"
-            r = _sb().table("app_users").update({"active": bool(active)}).eq(col, username).execute()
+            r = _sb().table("app_users").update({"active": bool(active)}).eq("username", username).execute()
             if not r.data:
                 return False, "User tidak ditemukan."
             return True, f"User '{username}' {'diaktifkan' if active else 'dinonaktifkan'}."
@@ -653,18 +352,9 @@ def set_user_active(username: str, active: bool) -> Tuple[bool, str]:
 
     data = ensure_users_file()
     users = data.get("users", {})
-    # Try email first, then username
-    key = username if username in users else None
-    if not key and is_email:
-        key = username  # keyed by email in new schema
-    if not key:
-        for k, v in users.items():
-            if v.get("email") == username or k == username:
-                key = k
-                break
-    if not key:
+    if username not in users:
         return False, "User tidak ditemukan."
-    users[key]["active"] = bool(active)
+    users[username]["active"] = bool(active)
     _save_json(USERS_FILE, data)
     return True, f"User '{username}' {'diaktifkan' if active else 'dinonaktifkan'}."
 
@@ -672,40 +362,29 @@ def set_user_active(username: str, active: bool) -> Tuple[bool, str]:
 def delete_user(username: str) -> Tuple[bool, str]:
     if username == DEFAULT_ADMIN_USER:
         return False, "Admin default tidak bisa dihapus."
-    is_email = "@" in username
-    
     if use_supabase() and _sb():
         try:
-            col = "email" if is_email else "username"
-            r = _sb().table("app_users").select("role").eq(col, username).execute()
+            r = _sb().table("app_users").select("role").eq("username", username).execute()
             if not r.data:
                 return False, "User tidak ditemukan."
             if r.data[0].get("role") == "admin":
                 admins = _sb().table("app_users").select("username").eq("role", "admin").execute()
                 if len(admins.data or []) <= 1:
                     return False, "Tidak bisa hapus admin terakhir."
-            # Delete tokens owned by user first (foreign key constraint)
-            _sb().table("app_tokens").delete().eq("token_owner", username).execute()
-            _sb().table("app_users").delete().eq(col, username).execute()
+            _sb().table("app_users").delete().eq("username", username).execute()
             return True, f"User '{username}' dihapus."
         except Exception as e:
             return False, str(e)
 
     data = ensure_users_file()
     users = data.get("users", {})
-    key = username if username in users else None
-    if not key:
-        for k, v in users.items():
-            if v.get("email") == username or k == username:
-                key = k
-                break
-    if not key:
+    if username not in users:
         return False, "User tidak ditemukan."
-    if users[key].get("role") == "admin":
+    if users[username].get("role") == "admin":
         admins = [u for u, i in users.items() if i.get("role") == "admin"]
         if len(admins) <= 1:
             return False, "Tidak bisa hapus admin terakhir."
-    del users[key]
+    del users[username]
     _save_json(USERS_FILE, data)
     return True, f"User '{username}' dihapus."
 
@@ -759,11 +438,14 @@ def create_token(
     *,
     credits: int = 0,
     valid_days: float = 0,
+    label: str = "",
     created_by: str = "admin",
 ) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
     mode = (mode or "").strip().lower()
     if mode not in ("credit", "time"):
         return False, "Mode harus 'credit' atau 'time'.", None
+
+    label = (label or "").strip() or f"token-{mode}"
 
     if mode == "credit":
         try:
@@ -796,6 +478,7 @@ def create_token(
         "mode": mode,
         "credits": credits_val,
         "credits_initial": credits_initial,
+        "label": label,
         "created_by": created_by,
         "created_at": _now_iso(),
         "expires_at": expires_at,
@@ -886,6 +569,9 @@ def get_token(token: str) -> Optional[Dict[str, Any]]:
 def _token_session_dict(token: str, info: Dict[str, Any]) -> Dict[str, Any]:
     mode = info.get("mode") or "credit"
     return {
+        "username": f"token:{token[:10]}…",
+        "role": "token",
+        "display_name": info.get("label") or "Token user",
         "auth_type": "token",
         "token": token,
         "token_mode": mode,
@@ -1069,32 +755,6 @@ def check_token_can_scrape(token: str, cost: int) -> Tuple[bool, str]:
     return True, "OK (mode credit)"
 
 
-def set_token_owner(token: str, username: str) -> Tuple[bool, str]:
-    """Mark token sebagai milik user tertentu. 1 token = 1 user."""
-    info = get_token(token)
-    if not info:
-        return False, "Token tidak ditemukan."
-    
-    owner = info.get("token_owner", "")
-    if owner and owner != username:
-        return False, "Token sudah digunakan akun lain. Token tidak valid."
-    
-    if use_supabase() and _sb():
-        try:
-            _sb().table("app_tokens").update({"token_owner": username}).eq("token", token).execute()
-            return True, f"Token ditetapkan ke {username}"
-        except Exception as e:
-            return False, f"DB error: {e}"
-    
-    data = ensure_tokens_file()
-    if token in data.get("tokens", {}):
-        data["tokens"][token]["token_owner"] = username
-        _save_json(TOKENS_FILE, data)
-        return True, f"Token ditetapkan ke {username}"
-    
-    return False, "Token tidak ditemukan."
-
-
 def mark_token_used(token: str) -> None:
     info = get_token(token)
     if not info:
@@ -1115,6 +775,29 @@ def mark_token_used(token: str) -> None:
         data["tokens"][token]["use_count"] = use_count
         data["tokens"][token]["last_used"] = last_used
         _save_json(TOKENS_FILE, data)
+
+
+def set_token_owner(token: str, username: str) -> Tuple[bool, str]:
+    """Tandai token milik user tertentu. 1 token = 1 user."""
+    info = get_token(token)
+    if not info:
+        return False, "Token tidak ditemukan."
+    owner = (info.get("token_owner") or "").strip()
+    username = (username or "").strip()
+    if owner and owner != username:
+        return False, "Token sudah digunakan akun lain."
+    if use_supabase() and _sb():
+        try:
+            _sb().table("app_tokens").update({"token_owner": username}).eq("token", token).execute()
+            return True, f"Token ditetapkan ke {username}"
+        except Exception as e:
+            return False, f"DB error: {e}"
+    data = ensure_tokens_file()
+    if token not in data.get("tokens", {}):
+        return False, "Token tidak ditemukan."
+    data["tokens"][token]["token_owner"] = username
+    _save_json(TOKENS_FILE, data)
+    return True, f"Token ditetapkan ke {username}"
 
 
 # -------------------- settings --------------------
@@ -1155,14 +838,10 @@ def save_settings(**kwargs) -> Tuple[bool, str]:
     return True, "Pengaturan disimpan."
 
 
-def buy_token_link(mode: str = "buy") -> str:
+def buy_token_link() -> str:
     s = get_settings()
-    if mode == "subscribe":
-        url = (s.get("subscribe_url") or "").strip()
-        msg = (s.get("subscribe_message") or "").strip()
-    else:
-        url = (s.get("buy_token_url") or "").strip()
-        msg = (s.get("buy_token_message") or "").strip()
+    url = (s.get("buy_token_url") or "").strip()
+    msg = (s.get("buy_token_message") or "").strip()
     if "wa.me" in url and msg and "text=" not in url:
         from urllib.parse import quote
         sep = "&" if "?" in url else "?"
