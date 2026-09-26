@@ -142,7 +142,27 @@ def _require_token_or_admin(user: Dict, is_admin: bool) -> bool:
                         use_container_width=True,
                     )
         
-        st.info("Setelah beli/berlangganan, gunakan token di menu **Token** untuk melanjutkan.")
+        st.info("Masukkan token di bawah ini untuk melanjutkan.")
+        with st.form("inline_token_form"):
+            tok = st.text_input("Token akses", placeholder="MP-XXXXXXXX...")
+            submit_tok = st.form_submit_button("Gunakan token", type="primary", use_container_width=True)
+        if submit_tok:
+            tok = (tok or "").strip()
+            if not tok:
+                st.error("Token kosong.")
+            else:
+                status, msg, token_session = token_status(tok)
+                if status != "ok" or not token_session:
+                    st.error(f"❌ {msg}")
+                else:
+                    identifier = user.get("email") or user.get("username") or "?"
+                    ok_owner, owner_msg = set_token_owner(tok, identifier)
+                    if not ok_owner:
+                        st.error(f"❌ {owner_msg}")
+                    else:
+                        st.session_state.auth_user.update(token_session)
+                        st.success("✅ Token berhasil digunakan.")
+                        st.rerun()
         st.stop()
         return False
     
