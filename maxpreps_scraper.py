@@ -598,6 +598,51 @@ def dedupe_blocks(blocks: List[str]) -> List[str]:
     return out
 
 
+_BLOCK_SEP = re.compile(r"^=+\s*$", re.M)
+
+
+def split_blocks(text: str) -> List[str]:
+    """Pisahkan isi file hasil scrape jadi list blok (gaya default & ringkas)."""
+    if "===========" in text:
+        # Gaya default: tiap blok dibuka/ditutup garis '===='
+        parts = [p.strip("\n") for p in _BLOCK_SEP.split(text)]
+        return [p for p in parts if p.strip()]
+    # Gaya ringkas: tiap blok diakhiri baris tag '#...'
+    blocks, cur = [], []
+    for line in text.splitlines():
+        cur.append(line)
+        if line.lstrip().startswith("#") and line.strip():
+            blocks.append("\n".join(cur).strip("\n"))
+            cur = []
+    tail = "\n".join(cur).strip("\n")
+    if tail:
+        blocks.append(tail)
+    return [b for b in blocks if b.strip()]
+
+
+def split_file_by_size(src: str, per_file: int = 30, dest_dir: Optional[str] = None) -> List[str]:
+    """Potong satu file hasil jadi beberapa file berisi `per_file` blok.
+
+    Return list path file hasil (kosong jika isi tidak punya blok).
+    """
+    per_file = max(1, int(per_file or 1))
+    with open(src, encoding="utf-8") as fh:
+        blocks = split_blocks(fh.read())
+    if not blocks:
+        return []
+    dest_dir = dest_dir or os.path.dirname(src) or TEMP_DIR
+    os.makedirs(dest_dir, exist_ok=True)
+    base = os.path.splitext(os.path.basename(src))[0]
+    out: List[str] = []
+    for i in range(0, len(blocks), per_file):
+        chunk = blocks[i:i + per_file]
+        path = os.path.join(dest_dir, f"{base}_part{i // per_file + 1}.txt")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("\n\n".join(chunk) + "\n")
+        out.append(path)
+    return out
+
+
 def write_blocks(path: str, blocks: List[str], overwrite: bool) -> Tuple[int, int]:
     """overwrite=True ganti isi file. False = append, skip duplikat."""
     parent = os.path.dirname(path)
