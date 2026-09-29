@@ -648,7 +648,7 @@ if menu == "Scrape":
             format_func=lambda s: (
                 "Default (judul + garis pemisah)"
                 if s == "default"
-                else "Ringkas (tanpa judul, ada baris state)"
+                else "Ringkas (paragi yutub)"
             ),
             horizontal=True,
         )
