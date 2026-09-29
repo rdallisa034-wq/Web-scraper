@@ -478,6 +478,7 @@ def format_match(
     state_code: str = "",
     sport: str = "football",
     add_title: bool = True,
+    style: str = "default",
 ) -> str:
     """Format output:
 
@@ -508,6 +509,18 @@ def format_match(
     else:
         mascot_line = ""
     _ = tanggal  # kompatibilitas pemanggil
+    if style == "compact":
+        # Ringkas: tanpa judul & garis pemisah, tambah baris state.
+        return (
+            f"{team_a} vs {team_b}\n"
+            f"{title}\n"
+            f"{mascot_line}\n"
+            f"📺watch live: {live}\n"
+            f"🗒️{detail}\n"
+            f"\n"
+            f"{tags}\n"
+            f"\n"
+        )
     return (
         "===========================\n"
         f"{title}\n"
@@ -924,6 +937,7 @@ def scrape_top25(
     game_info_limit: int = 40,
     game_workers: int = 4,
     state_workers: int = 6,
+    style: str = "default",
 ) -> Tuple[int, str, List[str], List[dict], List[str]]:
     """Scrape hanya pertandingan yang melibatkan tim MaxPreps Top 25.
 
@@ -949,7 +963,7 @@ def scrape_top25(
         True, ml, insecure, add_title,  # with_mascots=True: ambil mascot bersama Game Info
         with_game_info=True, game_info_limit=gi,
         state_workers=state_workers, game_workers=game_workers,
-        prefer_teams=prefer,
+        prefer_teams=prefer, style=style,
     )
     filtered = filter_blocks_top25(raw_blocks, top25)
     return last_code or code, last_url or url, filtered, top25, failed
@@ -968,6 +982,7 @@ def scrape_state(
     game_info_limit: int = 80,
     game_workers: int = 4,
     prefer_teams: Optional[set] = None,
+    style: str = "default",
 ) -> Tuple[int, str, List[str]]:
     """Scrape scores + Game Info paralel per state.
 
@@ -1090,6 +1105,7 @@ def scrape_state(
                 title, row["team_a"], row["mascot_a"], row["team_b"], row["mascot_b"],
                 tanggal, watch, details, state_name,
                 state_code=state, sport=sport, add_title=add_title,
+                style=style,
             )
         )
     return code, url, dedupe_blocks(blocks)
@@ -1109,6 +1125,7 @@ def scrape_states_parallel(
     state_workers: int = 6,
     game_workers: int = 3,
     prefer_teams: Optional[set] = None,
+    style: str = "default",
 ) -> Tuple[List[str], List[str], int, str, List[str]]:
     """Scrape banyak state secara paralel. Returns all_blocks, failed, last_code, last_url, last_blocks."""
     all_blocks: List[str] = []
@@ -1123,7 +1140,7 @@ def scrape_states_parallel(
             st, sport, mdy, wurl or WATCH_LIVE_DEFAULT,
             with_mascots, mascot_limit, insecure, add_title=add_title,
             with_game_info=with_game_info, game_info_limit=game_info_limit,
-            game_workers=game_workers, prefer_teams=prefer_teams,
+            game_workers=game_workers, prefer_teams=prefer_teams, style=style,
         )
 
     workers = max(1, min(state_workers, 10))
@@ -1187,6 +1204,8 @@ def main() -> int:
     ap.add_argument("--combined", action="store_true", help="Tulis ke schedules.txt gabungan")
     ap.add_argument("--all-states", action="store_true", help="Scrape semua state")
     ap.add_argument("--no-title", action="store_true", help="Jangan tambah ?title= di watch live")
+    ap.add_argument("--style", default="default", choices=["default", "compact"],
+                    help="Format blok output: default (dengan judul & garis) atau compact")
     args = ap.parse_args()
 
     state = (args.state or "tx").lower()
@@ -1218,6 +1237,7 @@ def main() -> int:
             args.mascots, gi_limit, False, not args.no_title,
             with_game_info=True, game_info_limit=gi_limit,
             state_workers=DEFAULT_STATE_WORKERS, game_workers=DEFAULT_GAME_WORKERS,
+            style=args.style,
         )
         for msg in failed:
             print("[fail]", msg)
@@ -1230,6 +1250,7 @@ def main() -> int:
                 st, args.sport, mdy, wurl, args.mascots, gi_limit,
                 False, add_title=not args.no_title, with_game_info=True,
                 game_info_limit=gi_limit, game_workers=DEFAULT_GAME_WORKERS,
+                style=args.style,
             )
             print(f"[{st}] HTTP {code} {url}  matches={len(blocks)}")
             if code != 200:

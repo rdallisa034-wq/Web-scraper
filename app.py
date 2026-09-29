@@ -642,6 +642,16 @@ if menu == "Scrape":
         mascots = st.checkbox(
             "Paksa ambil mascot untuk semua match (lebih lambat)", value=False
         )
+        out_style = st.radio(
+            "Format output",
+            ["default", "compact"],
+            format_func=lambda s: (
+                "Default (judul + garis pemisah)"
+                if s == "default"
+                else "Ringkas (tanpa judul, ada baris state)"
+            ),
+            horizontal=True,
+        )
 
     st.divider()
     st.subheader("2. Pilih tanggal")
@@ -756,6 +766,7 @@ if menu == "Scrape":
                     gi,
                     DEFAULT_GAME_WORKERS,
                     DEFAULT_STATE_WORKERS,
+                    style=out_style,
                 )
                 st.session_state.top25 = teams
                 tag = "top25"
@@ -780,6 +791,7 @@ if menu == "Scrape":
                     gi,
                     DEFAULT_GAME_WORKERS,
                     prefer_teams=prefer,
+                    style=out_style,
                 )
                 if code != 200:
                     st.session_state.err = f"Gagal HTTP {code}"
@@ -803,6 +815,7 @@ if menu == "Scrape":
                     gi,
                     DEFAULT_STATE_WORKERS,
                     DEFAULT_GAME_WORKERS,
+                    style=out_style,
                 )
                 blocks = dedupe_blocks(blocks)
                 tag = "all"
@@ -821,6 +834,7 @@ if menu == "Scrape":
                     True,
                     gi,
                     DEFAULT_GAME_WORKERS,
+                    style=out_style,
                 )
                 if code != 200:
                     st.session_state.err = f"Gagal HTTP {code}"
