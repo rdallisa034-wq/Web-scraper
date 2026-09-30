@@ -1,0 +1,22 @@
+# runtime data / generated — jangan commit
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# auth & token (berisi hash password / token aktif)
+users.json
+tokens.json
+access_log.json
+settings.json
+.otp_temp.json
+
+# hasil scrape
+tmp_out/
+schedules/
+schedules.txt
+mascot_cache.json
+watch_links.txt
+
+# streamlit
+.streamlit/secrets.toml

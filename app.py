@@ -67,6 +67,7 @@ from maxpreps_scraper import (
     dedupe_blocks,
     temp_output_path,
     write_blocks,
+    split_file_by_size,
     to_mdy,
     format_tanggal,
     DEFAULT_STATE_WORKERS,
@@ -94,6 +95,7 @@ for k, v in {
     "editor_path": "",
     "editor_text": "",
     "edit_msg": "",
+    "split_files": [],
     "token_dead_msg": "",
     "token_dead_after_msg": "",
 }.items():
@@ -642,6 +644,16 @@ if menu == "Scrape":
         mascots = st.checkbox(
             "Paksa ambil mascot untuk semua match (lebih lambat)", value=False
         )
+        out_style = st.radio(
+            "Format output",
+            ["default", "compact"],
+            format_func=lambda s: (
+                "Default (judul + garis pemisah)"
+                if s == "default"
+                else "Ringkas (tanpa judul, ada baris state)"
+            ),
+            horizontal=True,
+        )
 
     st.divider()
     st.subheader("2. Pilih tanggal")
@@ -756,6 +768,7 @@ if menu == "Scrape":
                     gi,
                     DEFAULT_GAME_WORKERS,
                     DEFAULT_STATE_WORKERS,
+                    style=out_style,
                 )
                 st.session_state.top25 = teams
                 tag = "top25"
@@ -780,6 +793,7 @@ if menu == "Scrape":
                     gi,
                     DEFAULT_GAME_WORKERS,
                     prefer_teams=prefer,
+                    style=out_style,
                 )
                 if code != 200:
                     st.session_state.err = f"Gagal HTTP {code}"
@@ -803,6 +817,7 @@ if menu == "Scrape":
                     gi,
                     DEFAULT_STATE_WORKERS,
                     DEFAULT_GAME_WORKERS,
+                    style=out_style,
                 )
                 blocks = dedupe_blocks(blocks)
                 tag = "all"
@@ -821,6 +836,7 @@ if menu == "Scrape":
                     True,
                     gi,
                     DEFAULT_GAME_WORKERS,
+                    style=out_style,
                 )
                 if code != 200:
                     st.session_state.err = f"Gagal HTTP {code}"
@@ -831,7 +847,8 @@ if menu == "Scrape":
 
             bar.progress(85, text="Simpan file…")
             blocks = dedupe_blocks(blocks)
-            dest = temp_output_path(tag, sport, mdy)
+            owner = user.get("email") or user.get("username") or "user"
+            dest = temp_output_path(tag, sport, mdy, owner=owner)
             written, _ = write_blocks(dest, blocks, overwrite=True)
 
             st.session_state.preview = "".join(blocks[:8])
@@ -937,19 +954,39 @@ elif menu == "Edit file":
     st.header("Edit file")
     _require_token_or_admin(user, is_admin)
 
+    owner = user.get("email") or user.get("username") or "user"
+    owner_safe = re.sub(r"[^a-z0-9_.-]+", "_", owner.lower()).strip("._") or "user"
+    user_dir = os.path.join(TEMP_DIR, owner_safe)
     files = []
-    if os.path.isdir(TEMP_DIR):
-        for n in sorted(os.listdir(TEMP_DIR)):
-            if n.endswith(".txt"):
-                files.append(os.path.join(TEMP_DIR, n))
+    if os.path.isdir(user_dir):
+        files = [
+            os.path.join(user_dir, n)
+            for n in sorted(os.listdir(user_dir))
+            if n.endswith(".txt") and os.path.isfile(os.path.join(user_dir, n))
+        ]
 
     if not files:
         st.info("Belum ada file. Scrape dulu di menu Scrape.")
     else:
         labels = [os.path.basename(f) for f in files]
-        i = st.selectbox(
-            "File", range(len(labels)), format_func=lambda i: labels[i]
-        )
+        file_col, delete_col = st.columns([10, 1])
+        with file_col:
+            i = st.selectbox(
+                "File", range(len(labels)), format_func=lambda i: labels[i]
+            )
+        with delete_col:
+            st.write("")
+            delete_file = st.button("✕", help="Hapus file terpilih")
+        if delete_file:
+            try:
+                os.remove(files[i])
+                st.session_state.editor_path = ""
+                st.session_state.split_files = []
+                log_access(user.get("username", "?"), "delete_file", labels[i])
+                st.success(f"File {labels[i]} dihapus.")
+                st.rerun()
+            except OSError as ex:
+                st.error(f"Gagal menghapus file: {ex}")
         path = files[i]
 
         if path != st.session_state.editor_path:
@@ -1039,3 +1076,56 @@ elif menu == "Edit file":
             mime="text/plain",
             use_container_width=True,
         )
+
+        st.divider()
+        st.subheader("Pisah file")
+        st.caption(
+            "Potong file ini jadi beberapa file .txt, masing-masing berisi N match. "
+            "File hasil disimpan di folder yang sama."
+        )
+        sc1, sc2 = st.columns([2, 3])
+        with sc1:
+            per_file = st.number_input(
+                "Match per file", min_value=1, max_value=1000, value=30, step=1
+            )
+        with sc2:
+            st.write("")
+            st.write("")
+            do_split = st.button(
+                "✂️ Pisah file", type="primary", use_container_width=True
+            )
+
+        if do_split:
+            try:
+                created = split_file_by_size(path, int(per_file))
+                if not created:
+                    st.session_state.split_files = []
+                    st.warning("Tidak ada blok match yang bisa dipisah di file ini.")
+                else:
+                    st.session_state.split_files = created
+                    log_access(
+                        user.get("username", "?"),
+                        "split_file",
+                        f"{os.path.basename(path)} → {len(created)} file @{per_file}",
+                    )
+                    st.success(
+                        f"{len(created)} file dibuat ({per_file} match/file)."
+                    )
+            except Exception as ex:
+                st.session_state.split_files = []
+                st.error(f"Gagal pisah: {ex}")
+
+        for fp in st.session_state.get("split_files", []):
+            try:
+                with open(fp, "rb") as fh:
+                    data = fh.read()
+            except Exception:
+                continue
+            st.download_button(
+                f"⬇️ {os.path.basename(fp)}",
+                data=data,
+                file_name=os.path.basename(fp),
+                mime="text/plain",
+                key=f"dl_split_{fp}",
+                use_container_width=True,
+            )
