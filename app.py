@@ -968,32 +968,26 @@ elif menu == "Edit file":
     if not files:
         st.info("Belum ada file. Scrape dulu di menu Scrape.")
     else:
-        st.caption("Pilih file untuk diedit. Tombol ✕ hanya menghapus file pada barisnya.")
-        if "editor_path" not in st.session_state or st.session_state.editor_path not in files:
-            st.session_state.editor_path = files[0]
-        for fp in files:
-            file_col, delete_col = st.columns([10, 1])
-            with file_col:
-                if st.button(
-                    ("▶ " if fp == st.session_state.editor_path else "") + os.path.basename(fp),
-                    key=f"select_file_{fp}", use_container_width=True,
-                ):
-                    st.session_state.editor_path = fp
-                    st.session_state.pop("ed_area", None)
-                    st.rerun()
-            with delete_col:
-                if st.button("✕", key=f"delete_file_{fp}", help=f"Hapus {os.path.basename(fp)}"):
-                    try:
-                        os.remove(fp)
-                        st.session_state.editor_path = ""
-                        st.session_state.split_files = []
-                        log_access(user.get("username", "?"), "delete_file", os.path.basename(fp))
-                        st.rerun()
-                    except OSError as ex:
-                        st.error(f"Gagal menghapus file: {ex}")
-        path = st.session_state.editor_path
-        i = files.index(path)
         labels = [os.path.basename(f) for f in files]
+        file_col, delete_col = st.columns([10, 1])
+        with file_col:
+            i = st.selectbox(
+                "File", range(len(labels)), format_func=lambda i: labels[i]
+            )
+        with delete_col:
+            st.write("")
+            delete_file = st.button("✕", help="Hapus file terpilih")
+        if delete_file:
+            try:
+                os.remove(files[i])
+                st.session_state.editor_path = ""
+                st.session_state.split_files = []
+                log_access(user.get("username", "?"), "delete_file", labels[i])
+                st.success(f"File {labels[i]} dihapus.")
+                st.rerun()
+            except OSError as ex:
+                st.error(f"Gagal menghapus file: {ex}")
+        path = files[i]
 
         if path != st.session_state.editor_path:
             st.session_state.editor_path = path
