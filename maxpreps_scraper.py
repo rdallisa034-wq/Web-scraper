@@ -1084,7 +1084,7 @@ def scrape_state(
     cache = load_cache_safe()
     # Game Info selalu ambil mascot juga dari halaman yang sama
     fetch_limit = max(int(mascot_limit or 0), int(game_info_limit or 0), 0)
-    need_fetch = (with_game_info or with_mascots) and fetch_limit > 0
+    need_fetch = (with_game_info or with_mascots or style == "game_day") and fetch_limit > 0
     prefer = {_norm_team(x) for x in (prefer_teams or set()) if x}
 
     prepared = []
@@ -1131,15 +1131,22 @@ def scrape_state(
         if need_fetch and href:
             # Selalu refresh detail jika belum ada game_info (mascot ikut dari halaman yang sama)
             want_info = with_game_info and not game_info
-            want_mascot = (with_mascots or with_game_info) and not (mascot_a and mascot_b)
+            want_mascot = (with_mascots or with_game_info or style == "game_day") and not (mascot_a and mascot_b)
             if want_info or want_mascot:
                 if is_pref:
                     pending_priority.append(idx)
                 else:
                     pending_normal.append(idx)
 
-    # Prioritas: match Top 25 dulu, baru sisanya sampai limit
-    pending_urls = (pending_priority + pending_normal)[:fetch_limit]
+    # Prioritas: match Top 25 dulu, baru sisanya sampai limit.
+    # game_day / paksa-mascot butuh mascot tiap blok → jangan batasi jumlah fetch.
+    # ponytail: unbounded = 1 request per match (ratusan di mode all-states, lambat).
+    # Batasi lagi hanya kalau kecepatan jadi masalah nyata.
+    pending = pending_priority + pending_normal
+    if with_mascots or style == "game_day":
+        pending_urls = pending
+    else:
+        pending_urls = pending[:fetch_limit]
     cache_updates = {}
 
     def _fetch_one(idx: int):
