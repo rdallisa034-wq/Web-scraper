@@ -59,8 +59,8 @@ from maxpreps_scraper import (
     list_dates_with_fallback,
     scrape_state,
     scrape_states_parallel,
-    scrape_top25,
     fetch_top25,
+    fetch_top25_states,
     top25_in_state,
     top25_status_message,
     filter_blocks_top25,
@@ -756,24 +756,20 @@ if menu == "Scrape":
             failed = []
 
             if top25_on and is_all:
-                bar.progress(20, text="Top 25 nasional…")
-                _, _, blocks, teams, failed = scrape_top25(
-                    sport,
-                    mdy,
-                    watch,
-                    mascots,
-                    gi,
-                    False,
-                    add_title,
-                    True,
-                    gi,
-                    DEFAULT_GAME_WORKERS,
-                    DEFAULT_STATE_WORKERS,
-                    style=out_style,
-                    owner=owner,
-                )
+                bar.progress(20, text="Top 25 per state…")
+                code25, _, teams, failed = fetch_top25_states(sport, workers=DEFAULT_STATE_WORKERS)
                 st.session_state.top25 = teams
-                tag = "top25"
+                prefer = {t["name"] for t in teams if t.get("name")}
+                raw, failed_scrape, _, _, _ = scrape_states_parallel(
+                    list(STATES.keys()), sport, mdy, watch, mascots, gi, False,
+                    add_title, True, gi, DEFAULT_STATE_WORKERS, DEFAULT_GAME_WORKERS,
+                    prefer_teams=prefer, style=out_style, owner=owner,
+                )
+                blocks = filter_blocks_top25(raw, teams)
+                failed.extend(failed_scrape)
+                if code25 != 200 and not teams:
+                    st.session_state.err = f"Gagal ranking Top 25 HTTP {code25}"
+                tag = "top25-all"
             elif top25_on:
                 bar.progress(20, text="Scrape + filter ranking…")
                 if not st.session_state.top25:
@@ -861,8 +857,10 @@ if menu == "Scrape":
                     st.session_state.file_bytes = f.read()
                 st.session_state.file_name = os.path.basename(dest)
 
+            expected = next((c for d, c in st.session_state.dates if d == selected), None)
+            count_note = f" (MaxPreps: {expected}, ter-scrape: {len(blocks)})" if expected is not None else f" (ter-scrape: {len(blocks)})"
             st.session_state.msg = (
-                f"Selesai: **{len(blocks)} match** → `{os.path.basename(dest)}`"
+                f"Selesai: **{len(blocks)} match**{count_note} → `{os.path.basename(dest)}`"
             )
             log_access(
                 user.get("username", "?"),

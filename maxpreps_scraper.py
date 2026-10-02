@@ -818,6 +818,30 @@ def parse_top25(html: str) -> List[dict]:
     return rows[:25]
 
 
+def fetch_top25_states(sport: str, insecure: bool = False, workers: int = 6) -> Tuple[int, str, List[dict], List[str]]:
+    """Top 25 tiap state, paralel. Returns code, label, teams, failed_states."""
+    per: Dict[str, List[dict]] = {}
+    failed: List[str] = []
+
+    def job(state: str):
+        return state, fetch_top25(sport, insecure=insecure, state=state)
+
+    with ThreadPoolExecutor(max_workers=max(1, min(workers, 10))) as ex:
+        futs = [ex.submit(job, s) for s in STATES]
+        for fut in as_completed(futs):
+            try:
+                st, (code, _url, rows) = fut.result()
+            except Exception as e:
+                failed.append(f"ERR {type(e).__name__}")
+                continue
+            if code != 200:
+                failed.append(f"{st.upper()} HTTP {code}")
+            else:
+                per[st] = rows[:25]
+    teams = [t for st in sorted(per) for t in per[st]]
+    return (200 if per else 403), f"Top 25 per state ({len(per)} state)", teams, failed
+
+
 def fetch_top25(sport: str, insecure: bool = False, state: str = "") -> Tuple[int, str, List[dict]]:
     """Ambil Top 25. Jika state diisi → ranking state; kosong → nasional."""
     st = (state or "").lower().strip()
