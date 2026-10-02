@@ -646,12 +646,12 @@ if menu == "Scrape":
         )
         out_style = st.radio(
             "Format output",
-            ["default", "compact"],
-            format_func=lambda s: (
-                "Default (judul + garis pemisah)"
-                if s == "default"
-                else "Ringkas (tanpa judul, ada baris state)"
-            ),
+            ["default", "compact", "game_day"],
+            format_func=lambda s: {
+                "default": "Default (judul + garis pemisah)",
+                "compact": "Ringkas (tanpa judul, ada baris state)",
+                "game_day": "Game Day (template live stream)",
+            }[s],
             horizontal=True,
         )
 

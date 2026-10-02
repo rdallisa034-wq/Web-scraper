@@ -465,6 +465,21 @@ def sport_hashtag_label(sport: str) -> str:
     return hashtag(core + gender).lstrip("#") or "Football"
 
 
+def _bold_text(text: str) -> str:
+    """Ubah ASCII Latin menjadi Unicode mathematical bold untuk template post."""
+    out = []
+    for char in text:
+        if "A" <= char <= "Z":
+            out.append(chr(ord(char) - ord("A") + 0x1D5D4))
+        elif "a" <= char <= "z":
+            out.append(chr(ord(char) - ord("a") + 0x1D5EE))
+        elif "0" <= char <= "9":
+            out.append(chr(ord(char) - ord("0") + 0x1D7EC))
+        else:
+            out.append(char)
+    return "".join(out)
+
+
 def format_match(
     title,
     team_a,
@@ -508,6 +523,20 @@ def format_match(
         mascot_line = mascot_a or mascot_b
     else:
         mascot_line = ""
+    if style == "game_day":
+        time_match = re.search(r"\b\d{1,2}(?::\d{2})?\s*[ap](?:\.?m\.?)?\b", detail, re.I)
+        game_time = time_match.group(0) if time_match else detail
+        live = watch_with_title(watch, team_a, team_b) if add_title else (watch or "")
+        stream_tag = _bold_text(f"Live_Stream_{team_a}_vs_{team_b}")
+        return (
+            f"{_bold_text('It\'s Game Day')}\n"
+            f"{state_name}\n"
+            f"{team_a} vs {team_b}\n"
+            f"📅 : {tanggal}\n"
+            f"⏰ : {game_time}\n"
+            f"{_bold_text('Game Will Be Streamed Live On')} : {live}\n"
+            f"#{stream_tag}\n\n"
+        )
     _ = tanggal  # kompatibilitas pemanggil
     if style == "compact":
         # Ringkas: tanpa judul & garis pemisah, tambah baris state.
