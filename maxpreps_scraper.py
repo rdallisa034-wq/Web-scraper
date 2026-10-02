@@ -527,11 +527,14 @@ def format_match(
         time_match = re.search(r"\b\d{1,2}(?::\d{2})?\s*[ap](?:\.?m\.?)?\b", detail, re.I)
         game_time = time_match.group(0) if time_match else detail
         live = watch_with_title(watch, team_a, team_b) if add_title else (watch or "")
-        stream_tag = _bold_text(f"Live_Stream_{team_a}_vs_{team_b}")
+        tag_a = team_a.replace(" ", "_")
+        tag_b = team_b.replace(" ", "_")
+        stream_tag = _bold_text(f"Live_Stream_{tag_a}_vs_{tag_b}")
         return (
             f"{_bold_text('It\'s Game Day')}\n"
-            f"{state_name}\n"
+            f"{title}\n"
             f"{team_a} vs {team_b}\n"
+            f"{mascot_line}\n"
             f"📅 : {tanggal}\n"
             f"⏰ : {game_time}\n"
             f"{_bold_text('Game Will Be Streamed Live On')} : {live}\n"
