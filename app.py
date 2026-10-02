@@ -580,6 +580,7 @@ elif menu == "Token":
 if menu == "Scrape":
     st.header("Scrape jadwal")
     _require_token_or_admin(user, is_admin)
+    owner = user.get("email") or user.get("username") or "user"
 
     st.subheader("1. Pilih sport & state")
     col1, col2 = st.columns([1, 1])
@@ -592,7 +593,7 @@ if menu == "Scrape":
         idx = next((i for i, k in enumerate(keys) if states[k] == "tx"), 0)
         state = states[st.selectbox("State", keys, index=idx, label_visibility="collapsed")]
 
-    watch_map = load_watch_map()
+    watch_map = load_watch_map(owner)
     watch = st.text_input(
         "Link watch live",
         value=watch_map.get(state) or watch_map.get("default") or WATCH_LIVE_DEFAULT,
@@ -741,7 +742,7 @@ if menu == "Scrape":
                 st.stop()
             pending_token_charge = (mode, user.get("token"), cost)
         if watch:
-            save_watch_link(watch, "default" if state == "all" else state, sport)
+            save_watch_link(watch, "default" if state == "all" else state, sport, owner=owner)
 
         is_all = state == "all"
         if top25_on:
@@ -769,6 +770,7 @@ if menu == "Scrape":
                     DEFAULT_GAME_WORKERS,
                     DEFAULT_STATE_WORKERS,
                     style=out_style,
+                    owner=owner,
                 )
                 st.session_state.top25 = teams
                 tag = "top25"
@@ -778,7 +780,7 @@ if menu == "Scrape":
                     _, _, st.session_state.top25 = fetch_top25(
                         sport, state="" if state == "all" else state
                     )
-                wurl = resolve_watch_url(watch, load_watch_map(), state, sport)
+                wurl = resolve_watch_url(watch, load_watch_map(owner), state, sport)
                 prefer = {t["name"] for t in st.session_state.top25 if t.get("name")}
                 code, _, raw = scrape_state(
                     state,
@@ -818,12 +820,13 @@ if menu == "Scrape":
                     DEFAULT_STATE_WORKERS,
                     DEFAULT_GAME_WORKERS,
                     style=out_style,
+                    owner=owner,
                 )
                 blocks = dedupe_blocks(blocks)
                 tag = "all"
             else:
                 bar.progress(25, text=f"Scrape {STATES.get(state, state)}…")
-                wurl = resolve_watch_url(watch, load_watch_map(), state, sport)
+                wurl = resolve_watch_url(watch, load_watch_map(owner), state, sport)
                 code, _, blocks = scrape_state(
                     state,
                     sport,

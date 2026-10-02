@@ -89,8 +89,22 @@ USER_AGENTS = [
 ]
 
 
-def load_watch_map(path: Optional[str] = None) -> Dict[str, str]:
-    path = path or WATCH_FILE
+def owner_safe(owner: str) -> str:
+    """Nama folder aman dari identifier user (email/username)."""
+    return re.sub(r"[^a-z0-9_.-]+", "_", (owner or "").lower()).strip("._") or "user"
+
+
+def watch_file_for(owner: str = "") -> str:
+    """watch_links.txt per user. CLI (owner kosong) tetap pakai file global."""
+    if not owner:
+        return WATCH_FILE
+    d = os.path.join(TEMP_DIR, owner_safe(owner))
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, "watch_links.txt")
+
+
+def load_watch_map(owner: str = "") -> Dict[str, str]:
+    path = watch_file_for(owner)
     mapping: Dict[str, str] = {}
     if not os.path.isfile(path):
         return mapping
@@ -104,9 +118,10 @@ def load_watch_map(path: Optional[str] = None) -> Dict[str, str]:
     return mapping
 
 
-def save_watch_link(url: str, state: str = "", sport: str = "") -> None:
-    """Persist the watch-live URL so next run remembers it."""
-    mapping = load_watch_map()
+def save_watch_link(url: str, state: str = "", sport: str = "", owner: str = "") -> None:
+    """Persist the watch-live URL so next run remembers it (per user)."""
+    path = watch_file_for(owner)
+    mapping = load_watch_map(owner)
     if url:
         mapping["default"] = url
         if state:
@@ -117,7 +132,7 @@ def save_watch_link(url: str, state: str = "", sport: str = "") -> None:
     for k in sorted(mapping):
         if mapping[k]:
             lines.append(f"{k}={mapping[k]}")
-    with open(WATCH_FILE, "w", encoding="utf-8") as fh:
+    with open(path, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines) + "\n")
 
 
@@ -1020,6 +1035,7 @@ def scrape_top25(
     game_workers: int = 4,
     state_workers: int = 6,
     style: str = "default",
+    owner: str = "",
 ) -> Tuple[int, str, List[str], List[dict], List[str]]:
     """Scrape hanya pertandingan yang melibatkan tim MaxPreps Top 25.
 
@@ -1045,7 +1061,7 @@ def scrape_top25(
         True, ml, insecure, add_title,  # with_mascots=True: ambil mascot bersama Game Info
         with_game_info=True, game_info_limit=gi,
         state_workers=state_workers, game_workers=game_workers,
-        prefer_teams=prefer, style=style,
+        prefer_teams=prefer, style=style, owner=owner,
     )
     filtered = filter_blocks_top25(raw_blocks, top25)
     return last_code or code, last_url or url, filtered, top25, failed
@@ -1215,6 +1231,7 @@ def scrape_states_parallel(
     game_workers: int = 3,
     prefer_teams: Optional[set] = None,
     style: str = "default",
+    owner: str = "",
 ) -> Tuple[List[str], List[str], int, str, List[str]]:
     """Scrape banyak state secara paralel. Returns all_blocks, failed, last_code, last_url, last_blocks."""
     all_blocks: List[str] = []
@@ -1224,7 +1241,7 @@ def scrape_states_parallel(
     lock = __import__("threading").Lock()
 
     def job(st: str):
-        wurl = resolve_watch_url(watch, load_watch_map(), st, sport)
+        wurl = resolve_watch_url(watch, load_watch_map(owner), st, sport)
         return st, scrape_state(
             st, sport, mdy, wurl or WATCH_LIVE_DEFAULT,
             with_mascots, mascot_limit, insecure, add_title=add_title,
