@@ -645,6 +645,11 @@ if menu == "Scrape":
         mascots = st.checkbox(
             "Paksa ambil mascot untuk semua match (lebih lambat)", value=False
         )
+        group_by_class = st.checkbox(
+            "Kelompokkan output berdasarkan class sekolah",
+            value=False,
+            help="Baca Class/Division dari detail match dan buat section per kelas.",
+        )
         out_style = st.radio(
             "Format output",
             ["default", "compact", "game_day"],
@@ -764,6 +769,7 @@ if menu == "Scrape":
                     list(STATES.keys()), sport, mdy, watch, mascots, gi, False,
                     add_title, True, gi, DEFAULT_STATE_WORKERS, DEFAULT_GAME_WORKERS,
                     prefer_teams=prefer, style=out_style, owner=owner,
+                    group_by_class=group_by_class,
                 )
                 blocks = filter_blocks_top25(raw, teams)
                 failed.extend(failed_scrape)
@@ -792,6 +798,7 @@ if menu == "Scrape":
                     DEFAULT_GAME_WORKERS,
                     prefer_teams=prefer,
                     style=out_style,
+                    group_by_class=group_by_class,
                 )
                 if code != 200:
                     st.session_state.err = f"Gagal HTTP {code}"
@@ -817,6 +824,7 @@ if menu == "Scrape":
                     DEFAULT_GAME_WORKERS,
                     style=out_style,
                     owner=owner,
+                    group_by_class=group_by_class,
                 )
                 blocks = dedupe_blocks(blocks)
                 tag = "all"
@@ -836,6 +844,7 @@ if menu == "Scrape":
                     gi,
                     DEFAULT_GAME_WORKERS,
                     style=out_style,
+                    group_by_class=group_by_class,
                 )
                 if code != 200:
                     st.session_state.err = f"Gagal HTTP {code}"

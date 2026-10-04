@@ -1107,6 +1107,7 @@ def scrape_state(
     game_workers: int = 4,
     prefer_teams: Optional[set] = None,
     style: str = "default",
+    group_by_class: bool = False,
 ) -> Tuple[int, str, List[str]]:
     """Scrape scores + Game Info paralel per state.
 
@@ -1240,12 +1241,13 @@ def scrape_state(
             state_code=state, sport=sport, add_title=add_title,
             style=style,
         )))
+    if not group_by_class:
+        return code, url, dedupe_blocks([block for _, block in blocks])
     grouped: Dict[str, List[str]] = {}
     for school_class, block in blocks:
         grouped.setdefault(school_class, []).append(block)
     grouped_blocks: List[str] = []
     for school_class in sorted(grouped, key=lambda x: (x == "Tidak diketahui", x)):
-        # header unik per state agar dedupe lintas state tidak menghapusnya
         label = "Kelas tidak diketahui" if school_class == "Tidak diketahui" else f"Kelas {school_class}"
         section = grouped[school_class]
         grouped_blocks.append(f"\n{label} — {state_name}\n\n{section[0]}")
@@ -1269,6 +1271,7 @@ def scrape_states_parallel(
     prefer_teams: Optional[set] = None,
     style: str = "default",
     owner: str = "",
+    group_by_class: bool = False,
 ) -> Tuple[List[str], List[str], int, str, List[str]]:
     """Scrape banyak state secara paralel. Returns all_blocks, failed, last_code, last_url, last_blocks."""
     all_blocks: List[str] = []
@@ -1284,6 +1287,7 @@ def scrape_states_parallel(
             with_mascots, mascot_limit, insecure, add_title=add_title,
             with_game_info=with_game_info, game_info_limit=game_info_limit,
             game_workers=game_workers, prefer_teams=prefer_teams, style=style,
+            group_by_class=group_by_class,
         )
 
     workers = max(1, min(state_workers, 10))
