@@ -376,20 +376,20 @@ def merge_save_cache(updates: dict) -> None:
         save_cache(cache)
 
 
-def scrape_game_info(game_url: str, insecure: bool) -> Tuple[str, str, str]:
+def scrape_game_info(game_url: str, insecure: bool) -> Tuple[str, str, str, str]:
     """Ambil mascot + teks Game Info dari halaman game MaxPreps.
 
-    Returns: (mascot_a, mascot_b, game_info_description)
+    Returns: (mascot_a, mascot_b, game_info_description, school_class)
 
     Contoh:
       The Animo Robinson varsity football team has an away non-conference
       game @ Chadwick (Palos Verdes Peninsula, CA) on Friday, September 11 @ 3:30p.
     """
     if not game_url:
-        return "", "", ""
+        return "", "", "", ""
     code, page = fetch(game_url, insecure=insecure)
     if code != 200:
-        return "", "", ""
+        return "", "", "", ""
 
     names = [clean(x) for x in re.findall(r'class="mascot-name"\s*>\s*([^<]+)', page)]
     if len(names) < 2:
@@ -413,11 +413,13 @@ def scrape_game_info(game_url: str, insecure: bool) -> Tuple[str, str, str]:
         description = re.sub(r"\s*@\s*", " @ ", description)
         description = re.sub(r"\s{2,}", " ", description).strip()
 
-    return mascot_a, mascot_b, description
+    class_match = re.search(r"\b(?:class|division)\s*[-:]?\s*([1-9A-Z][A-Z0-9-]*)\b", page, re.I)
+    school_class = class_match.group(1).upper() if class_match else ""
+    return mascot_a, mascot_b, description, school_class
 
 
 def scrape_mascots(game_url: str, insecure: bool) -> Tuple[str, str]:
-    a, b, _ = scrape_game_info(game_url, insecure)
+    a, b, _, _ = scrape_game_info(game_url, insecure)
     return a, b
 
 
@@ -1139,7 +1141,7 @@ def scrape_state(
         href = card.get("href") or ""
         if href.startswith("/"):
             href = urljoin("https://www.maxpreps.com/", href)
-        mascot_a = mascot_b = ""
+        mascot_a = mascot_b = school_class = ""
         game_info = ""
         ck = f"{state}|{team_a}|{team_b}|{mdy}".lower()
         ck_legacy = f"{state}|{team_a}|{team_b}".lower()
@@ -1148,6 +1150,8 @@ def scrape_state(
             mascot_a, mascot_b = cached[0] or "", cached[1] or ""
             if len(cached) >= 3:
                 game_info = cached[2] or ""
+            if len(cached) >= 4:
+                school_class = cached[3] or ""
         idx = len(prepared)
         is_pref = False
         if prefer:
@@ -1207,20 +1211,21 @@ def scrape_state(
                         results.append(fut.result())
                     except Exception:
                         pass
-        for i, (ma, mb, desc) in results:
+        for i, (ma, mb, desc, school_class) in results:
             if ma or mb:
                 prepared[i]["mascot_a"] = prepared[i]["mascot_a"] or ma
                 prepared[i]["mascot_b"] = prepared[i]["mascot_b"] or mb
             if desc:
                 prepared[i]["game_info"] = desc
+            prepared[i]["school_class"] = school_class
             cache_updates[prepared[i]["ck"]] = [
-                prepared[i]["mascot_a"], prepared[i]["mascot_b"], prepared[i]["game_info"]
+                prepared[i]["mascot_a"], prepared[i]["mascot_b"], prepared[i]["game_info"], school_class
             ]
 
     if cache_updates:
         merge_save_cache(cache_updates)
 
-    blocks: List[str] = []
+    blocks: List[Tuple[str, str]] = []
     for row in prepared:
         if row["game_info"]:
             details = row["game_info"]
@@ -1229,15 +1234,23 @@ def scrape_state(
                 row["team_a"], row["team_b"], row["raw_details"],
                 row["score_a"], row["score_b"],
             )
-        blocks.append(
-            format_match(
-                title, row["team_a"], row["mascot_a"], row["team_b"], row["mascot_b"],
-                tanggal, watch, details, state_name,
-                state_code=state, sport=sport, add_title=add_title,
-                style=style,
-            )
-        )
-    return code, url, dedupe_blocks(blocks)
+        blocks.append((row.get("school_class") or "Tidak diketahui", format_match(
+            title, row["team_a"], row["mascot_a"], row["team_b"], row["mascot_b"],
+            tanggal, watch, details, state_name,
+            state_code=state, sport=sport, add_title=add_title,
+            style=style,
+        )))
+    grouped: Dict[str, List[str]] = {}
+    for school_class, block in blocks:
+        grouped.setdefault(school_class, []).append(block)
+    grouped_blocks: List[str] = []
+    for school_class in sorted(grouped, key=lambda x: (x == "Tidak diketahui", x)):
+        # header unik per state agar dedupe lintas state tidak menghapusnya
+        label = "Kelas tidak diketahui" if school_class == "Tidak diketahui" else f"Kelas {school_class}"
+        section = grouped[school_class]
+        grouped_blocks.append(f"\n{label} — {state_name}\n\n{section[0]}")
+        grouped_blocks.extend(section[1:])
+    return code, url, dedupe_blocks(grouped_blocks)
 
 
 def scrape_states_parallel(
