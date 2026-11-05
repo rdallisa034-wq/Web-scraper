@@ -734,6 +734,51 @@ def fetch_top25(sport: str, insecure: bool = False, state: str = "") -> Tuple[in
     return code, url, teams
 
 
+def fetch_top25_states(
+    sport: str,
+    workers: int = DEFAULT_STATE_WORKERS,
+    insecure: bool = False,
+) -> Tuple[int, str, List[dict], List[str]]:
+    """Ambil ranking Top 25 per state (paralel), gabungkan semua tim.
+
+    Return: (http_code, note, teams, failed_states)
+    """
+    state_codes = list(STATES.keys())
+    all_teams: List[dict] = []
+    failed: List[str] = []
+    seen = set()  # (norm_name, state)
+
+    def _one(st: str):
+        try:
+            code, url, teams = fetch_top25(sport, insecure=insecure, state=st)
+            return st, code, teams or []
+        except Exception:
+            return st, 0, []
+
+    with ThreadPoolExecutor(max_workers=max(1, int(workers))) as ex:
+        futs = {ex.submit(_one, st): st for st in state_codes}
+        for fut in as_completed(futs):
+            st, code, teams = fut.result()
+            if code != 200 or not teams:
+                failed.append(st)
+                continue
+            for t in teams:
+                name = t.get("name") or ""
+                st_code = (t.get("state") or st or "").lower()
+                key = (_norm_team(name), st_code)
+                if key in seen or not name:
+                    continue
+                seen.add(key)
+                if not t.get("state"):
+                    t["state"] = st
+                all_teams.append(t)
+
+    # code 200 jika minimal ada 1 state sukses
+    code = 200 if all_teams else (0 if failed else 200)
+    note = f"top25-states:{len(all_teams)} teams, failed={len(failed)}"
+    return code, note, all_teams, failed
+
+
 def _short_school_name(name: str) -> str:
     """Allen Eagles → Allen; North Crowley Panthers → North Crowley (heuristic)."""
     name = clean(name)
