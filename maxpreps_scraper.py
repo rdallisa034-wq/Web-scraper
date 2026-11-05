@@ -26,7 +26,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timedelta
+from datetime import datetime
 from html.parser import HTMLParser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Tuple
@@ -89,8 +89,22 @@ USER_AGENTS = [
 ]
 
 
-def load_watch_map(path: Optional[str] = None) -> Dict[str, str]:
-    path = path or WATCH_FILE
+def owner_safe(owner: str) -> str:
+    """Nama folder aman dari identifier user (email/username)."""
+    return re.sub(r"[^a-z0-9_.-]+", "_", (owner or "").lower()).strip("._") or "user"
+
+
+def watch_file_for(owner: str = "") -> str:
+    """watch_links.txt per user. CLI (owner kosong) tetap pakai file global."""
+    if not owner:
+        return WATCH_FILE
+    d = os.path.join(TEMP_DIR, owner_safe(owner))
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, "watch_links.txt")
+
+
+def load_watch_map(owner: str = "") -> Dict[str, str]:
+    path = watch_file_for(owner)
     mapping: Dict[str, str] = {}
     if not os.path.isfile(path):
         return mapping
@@ -104,9 +118,10 @@ def load_watch_map(path: Optional[str] = None) -> Dict[str, str]:
     return mapping
 
 
-def save_watch_link(url: str, state: str = "", sport: str = "") -> None:
-    """Persist the watch-live URL so next run remembers it."""
-    mapping = load_watch_map()
+def save_watch_link(url: str, state: str = "", sport: str = "", owner: str = "") -> None:
+    """Persist the watch-live URL so next run remembers it (per user)."""
+    path = watch_file_for(owner)
+    mapping = load_watch_map(owner)
     if url:
         mapping["default"] = url
         if state:
@@ -117,7 +132,7 @@ def save_watch_link(url: str, state: str = "", sport: str = "") -> None:
     for k in sorted(mapping):
         if mapping[k]:
             lines.append(f"{k}={mapping[k]}")
-    with open(WATCH_FILE, "w", encoding="utf-8") as fh:
+    with open(path, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines) + "\n")
 
 
@@ -300,7 +315,7 @@ def parse_cards(html: str) -> List[dict]:
 
 
 def parse_calendar(html: str) -> List[Tuple[str, int]]:
-    """Parse kalender; kembalikan dari kemarin (1 hari belakang) s/d tanggal mendatang."""
+    """Parse kalender; hanya kembalikan hari ini & tanggal mendatang."""
     best: Dict[str, int] = {}
     for href, count in re.findall(
         r'href="[^"]*[?&]date=(\d{1,2}/\d{1,2}/\d{4})"[^>]*data-contest-count="(\d+)"',
@@ -311,21 +326,20 @@ def parse_calendar(html: str) -> List[Tuple[str, int]]:
         best.setdefault(href, 0)
 
     today = datetime.now().date()
-    min_date = today - timedelta(days=1)  # izinkan 1 hari ke belakang
 
     def key(item):
         d = item[0].split("/")
         return (int(d[2]), int(d[0]), int(d[1]))
 
-    def is_allowed(mdy: str) -> bool:
+    def is_today_or_future(mdy: str) -> bool:
         try:
             parts = mdy.split("/")
             dt = datetime(int(parts[2]), int(parts[0]), int(parts[1])).date()
-            return dt >= min_date
+            return dt >= today
         except Exception:
             return False
 
-    filtered = [(d, c) for d, c in best.items() if is_allowed(d)]
+    filtered = [(d, c) for d, c in best.items() if is_today_or_future(d)]
     return sorted(filtered, key=key)
 
 
@@ -362,20 +376,20 @@ def merge_save_cache(updates: dict) -> None:
         save_cache(cache)
 
 
-def scrape_game_info(game_url: str, insecure: bool) -> Tuple[str, str, str]:
+def scrape_game_info(game_url: str, insecure: bool) -> Tuple[str, str, str, str]:
     """Ambil mascot + teks Game Info dari halaman game MaxPreps.
 
-    Returns: (mascot_a, mascot_b, game_info_description)
+    Returns: (mascot_a, mascot_b, game_info_description, school_class)
 
     Contoh:
       The Animo Robinson varsity football team has an away non-conference
       game @ Chadwick (Palos Verdes Peninsula, CA) on Friday, September 11 @ 3:30p.
     """
     if not game_url:
-        return "", "", ""
+        return "", "", "", ""
     code, page = fetch(game_url, insecure=insecure)
     if code != 200:
-        return "", "", ""
+        return "", "", "", ""
 
     names = [clean(x) for x in re.findall(r'class="mascot-name"\s*>\s*([^<]+)', page)]
     if len(names) < 2:
@@ -399,11 +413,13 @@ def scrape_game_info(game_url: str, insecure: bool) -> Tuple[str, str, str]:
         description = re.sub(r"\s*@\s*", " @ ", description)
         description = re.sub(r"\s{2,}", " ", description).strip()
 
-    return mascot_a, mascot_b, description
+    class_match = re.search(r"\b(?:class|division)\s*[-:]?\s*([1-9A-Z][A-Z0-9-]*)\b", page, re.I)
+    school_class = class_match.group(1).upper() if class_match else ""
+    return mascot_a, mascot_b, description, school_class
 
 
 def scrape_mascots(game_url: str, insecure: bool) -> Tuple[str, str]:
-    a, b, _ = scrape_game_info(game_url, insecure)
+    a, b, _, _ = scrape_game_info(game_url, insecure)
     return a, b
 
 
@@ -466,6 +482,21 @@ def sport_hashtag_label(sport: str) -> str:
     return hashtag(core + gender).lstrip("#") or "Football"
 
 
+def _bold_text(text: str) -> str:
+    """Ubah ASCII Latin menjadi Unicode mathematical bold untuk template post."""
+    out = []
+    for char in text:
+        if "A" <= char <= "Z":
+            out.append(chr(ord(char) - ord("A") + 0x1D5D4))
+        elif "a" <= char <= "z":
+            out.append(chr(ord(char) - ord("a") + 0x1D5EE))
+        elif "0" <= char <= "9":
+            out.append(chr(ord(char) - ord("0") + 0x1D7EC))
+        else:
+            out.append(char)
+    return "".join(out)
+
+
 def format_match(
     title,
     team_a,
@@ -479,6 +510,7 @@ def format_match(
     state_code: str = "",
     sport: str = "football",
     add_title: bool = True,
+    style: str = "default",
 ) -> str:
     """Format output:
 
@@ -508,7 +540,36 @@ def format_match(
         mascot_line = mascot_a or mascot_b
     else:
         mascot_line = ""
+    if style == "game_day":
+        time_match = re.search(r"\b\d{1,2}(?::\d{2})?\s*[ap](?:\.?m\.?)?\b", detail, re.I)
+        game_time = time_match.group(0) if time_match else detail
+        live = watch_with_title(watch, team_a, team_b) if add_title else (watch or "")
+        tag_a = team_a.replace(" ", "_")
+        tag_b = team_b.replace(" ", "_")
+        stream_tag = _bold_text(f"Live_Stream_{tag_a}_vs_{tag_b}")
+        return (
+            f"{_bold_text('It\'s Game Day')}\n"
+            f"{title}\n"
+            f"{team_a} vs {team_b}\n"
+            f"{mascot_line}\n"
+            f"📅 : {tanggal}\n"
+            f"⏰ : {game_time}\n"
+            f"{_bold_text('Game Will Be Streamed Live On')} : {live}\n"
+            f"#{stream_tag}\n\n"
+        )
     _ = tanggal  # kompatibilitas pemanggil
+    if style == "compact":
+        # Ringkas: tanpa judul & garis pemisah, tambah baris state.
+        return (
+            f"{team_a} vs {team_b}\n"
+            f"{title}\n"
+            f"{mascot_line}\n"
+            f"📺watch live: {live}\n"
+            f"🗒️{detail}\n"
+            f"\n"
+            f"{tags}\n"
+            f"\n"
+        )
     return (
         "===========================\n"
         f"{title}\n"
@@ -538,8 +599,13 @@ def all_states_file(sport: str, mdy: str) -> str:
     return os.path.join(OUTPUT_DIR, f"{sport_safe}-{iso}.txt")
 
 
-def temp_output_path(state: str, sport: str, mdy: str) -> str:
-    """Buat path file sementara unik di TEMP_DIR."""
+def temp_output_path(state: str, sport: str, mdy: str, owner: str = "") -> str:
+    """Buat path file sementara unik; owner mencegah file antar user bertumpuk."""
+    output_dir = TEMP_DIR
+    if owner:
+        owner_safe = re.sub(r"[^a-z0-9_.-]+", "_", owner.lower()).strip("._") or "user"
+        output_dir = os.path.join(TEMP_DIR, owner_safe)
+        os.makedirs(output_dir, exist_ok=True)
     sport_safe = re.sub(r"[^a-z0-9]+", "-", (sport or "football").lower()).strip("-")
     iso = mdy_to_iso(mdy)
     stamp = datetime.now().strftime("%H%M%S")
@@ -547,7 +613,7 @@ def temp_output_path(state: str, sport: str, mdy: str) -> str:
         name = f"{sport_safe}-all-{iso}-{stamp}.txt"
     else:
         name = f"{state.lower()}-{sport_safe}-{iso}-{stamp}.txt"
-    return os.path.join(TEMP_DIR, name)
+    return os.path.join(output_dir, name)
 
 
 def set_latest_output(path: str) -> None:
@@ -586,59 +652,49 @@ def dedupe_blocks(blocks: List[str]) -> List[str]:
     return out
 
 
-def split_file_by_size(path: str, matches_per_file: int = 30) -> List[str]:
-    """Pisah file .txt jadwal jadi beberapa file, masing-masing N match.
+_BLOCK_SEP = re.compile(r"^=+\s*$", re.M)
 
-    Return list path file yang dibuat. Jika kosong/invalid → [].
+
+def split_blocks(text: str) -> List[str]:
+    """Pisahkan isi file hasil scrape jadi list blok (gaya default & ringkas)."""
+    if "===========" in text:
+        # Gaya default: tiap blok dibuka/ditutup garis '===='
+        parts = [p.strip("\n") for p in _BLOCK_SEP.split(text)]
+        return [p for p in parts if p.strip()]
+    # Gaya ringkas: tiap blok diakhiri baris tag '#...'
+    blocks, cur = [], []
+    for line in text.splitlines():
+        cur.append(line)
+        if line.lstrip().startswith("#") and line.strip():
+            blocks.append("\n".join(cur).strip("\n"))
+            cur = []
+    tail = "\n".join(cur).strip("\n")
+    if tail:
+        blocks.append(tail)
+    return [b for b in blocks if b.strip()]
+
+
+def split_file_by_size(src: str, per_file: int = 30, dest_dir: Optional[str] = None) -> List[str]:
+    """Potong satu file hasil jadi beberapa file berisi `per_file` blok.
+
+    Return list path file hasil (kosong jika isi tidak punya blok).
     """
-    if not path or not os.path.isfile(path):
-        return []
-    try:
-        matches_per_file = max(1, int(matches_per_file))
-    except (TypeError, ValueError):
-        matches_per_file = 30
-
-    with open(path, encoding="utf-8") as fh:
-        text = fh.read()
-
-    # Blok dipisah separator garis =====
-    parts = re.split(r"(?=^={10,}\s*$)", text, flags=re.M)
-    blocks = [p for p in parts if p.strip() and "vs" in p.lower()]
-    if not blocks:
-        # fallback: potong per double-newline groups yang berisi vs
-        chunks = re.split(r"\n{2,}", text)
-        blocks = []
-        buf: List[str] = []
-        for ch in chunks:
-            buf.append(ch)
-            joined = "\n\n".join(buf)
-            if "vs" in joined.lower() and "====" in joined:
-                blocks.append(joined if joined.endswith("\n") else joined + "\n")
-                buf = []
-        if buf:
-            joined = "\n\n".join(buf)
-            if joined.strip():
-                blocks.append(joined if joined.endswith("\n") else joined + "\n")
-
+    per_file = max(1, int(per_file or 1))
+    with open(src, encoding="utf-8") as fh:
+        blocks = split_blocks(fh.read())
     if not blocks:
         return []
-
-    base, ext = os.path.splitext(path)
-    if not ext:
-        ext = ".txt"
-    created: List[str] = []
-    total = len(blocks)
-    part = 1
-    for i in range(0, total, matches_per_file):
-        chunk = blocks[i : i + matches_per_file]
-        out_path = f"{base}_part{part:02d}{ext}"
-        with open(out_path, "w", encoding="utf-8") as fh:
-            fh.write("".join(chunk))
-            if not chunk[-1].endswith("\n"):
-                fh.write("\n")
-        created.append(out_path)
-        part += 1
-    return created
+    dest_dir = dest_dir or os.path.dirname(src) or TEMP_DIR
+    os.makedirs(dest_dir, exist_ok=True)
+    base = os.path.splitext(os.path.basename(src))[0]
+    out: List[str] = []
+    for i in range(0, len(blocks), per_file):
+        chunk = blocks[i:i + per_file]
+        path = os.path.join(dest_dir, f"{base}_part{i // per_file + 1}.txt")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("\n\n".join(chunk) + "\n")
+        out.append(path)
+    return out
 
 
 def write_blocks(path: str, blocks: List[str], overwrite: bool) -> Tuple[int, int]:
@@ -764,6 +820,30 @@ def parse_top25(html: str) -> List[dict]:
     return rows[:25]
 
 
+def fetch_top25_states(sport: str, insecure: bool = False, workers: int = 6) -> Tuple[int, str, List[dict], List[str]]:
+    """Top 25 tiap state, paralel. Returns code, label, teams, failed_states."""
+    per: Dict[str, List[dict]] = {}
+    failed: List[str] = []
+
+    def job(state: str):
+        return state, fetch_top25(sport, insecure=insecure, state=state)
+
+    with ThreadPoolExecutor(max_workers=max(1, min(workers, 10))) as ex:
+        futs = [ex.submit(job, s) for s in STATES]
+        for fut in as_completed(futs):
+            try:
+                st, (code, _url, rows) = fut.result()
+            except Exception as e:
+                failed.append(f"ERR {type(e).__name__}")
+                continue
+            if code != 200:
+                failed.append(f"{st.upper()} HTTP {code}")
+            else:
+                per[st] = rows[:25]
+    teams = [t for st in sorted(per) for t in per[st]]
+    return (200 if per else 403), f"Top 25 per state ({len(per)} state)", teams, failed
+
+
 def fetch_top25(sport: str, insecure: bool = False, state: str = "") -> Tuple[int, str, List[dict]]:
     """Ambil Top 25. Jika state diisi → ranking state; kosong → nasional."""
     st = (state or "").lower().strip()
@@ -787,51 +867,6 @@ def fetch_top25(sport: str, insecure: bool = False, state: str = "") -> Tuple[in
                 return code2, url2, parse_top25(page2)
         return code, url, teams
     return code, url, teams
-
-
-def fetch_top25_states(
-    sport: str,
-    workers: int = DEFAULT_STATE_WORKERS,
-    insecure: bool = False,
-) -> Tuple[int, str, List[dict], List[str]]:
-    """Ambil ranking Top 25 per state (paralel), gabungkan semua tim.
-
-    Return: (http_code, note, teams, failed_states)
-    """
-    state_codes = list(STATES.keys())
-    all_teams: List[dict] = []
-    failed: List[str] = []
-    seen = set()  # (norm_name, state)
-
-    def _one(st: str):
-        try:
-            code, url, teams = fetch_top25(sport, insecure=insecure, state=st)
-            return st, code, teams or []
-        except Exception:
-            return st, 0, []
-
-    with ThreadPoolExecutor(max_workers=max(1, int(workers))) as ex:
-        futs = {ex.submit(_one, st): st for st in state_codes}
-        for fut in as_completed(futs):
-            st, code, teams = fut.result()
-            if code != 200 or not teams:
-                failed.append(st)
-                continue
-            for t in teams:
-                name = t.get("name") or ""
-                st_code = (t.get("state") or st or "").lower()
-                key = (_norm_team(name), st_code)
-                if key in seen or not name:
-                    continue
-                seen.add(key)
-                if not t.get("state"):
-                    t["state"] = st
-                all_teams.append(t)
-
-    # code 200 jika minimal ada 1 state sukses
-    code = 200 if all_teams else (0 if failed else 200)
-    note = f"top25-states:{len(all_teams)} teams, failed={len(failed)}"
-    return code, note, all_teams, failed
 
 
 def _short_school_name(name: str) -> str:
@@ -1025,6 +1060,8 @@ def scrape_top25(
     game_info_limit: int = 40,
     game_workers: int = 4,
     state_workers: int = 6,
+    style: str = "default",
+    owner: str = "",
 ) -> Tuple[int, str, List[str], List[dict], List[str]]:
     """Scrape hanya pertandingan yang melibatkan tim MaxPreps Top 25.
 
@@ -1050,7 +1087,7 @@ def scrape_top25(
         True, ml, insecure, add_title,  # with_mascots=True: ambil mascot bersama Game Info
         with_game_info=True, game_info_limit=gi,
         state_workers=state_workers, game_workers=game_workers,
-        prefer_teams=prefer,
+        prefer_teams=prefer, style=style, owner=owner,
     )
     filtered = filter_blocks_top25(raw_blocks, top25)
     return last_code or code, last_url or url, filtered, top25, failed
@@ -1069,6 +1106,8 @@ def scrape_state(
     game_info_limit: int = 80,
     game_workers: int = 4,
     prefer_teams: Optional[set] = None,
+    style: str = "default",
+    group_by_class: bool = False,
 ) -> Tuple[int, str, List[str]]:
     """Scrape scores + Game Info paralel per state.
 
@@ -1088,7 +1127,7 @@ def scrape_state(
     cache = load_cache_safe()
     # Game Info selalu ambil mascot juga dari halaman yang sama
     fetch_limit = max(int(mascot_limit or 0), int(game_info_limit or 0), 0)
-    need_fetch = (with_game_info or with_mascots) and fetch_limit > 0
+    need_fetch = (with_game_info or with_mascots or style == "game_day") and fetch_limit > 0
     prefer = {_norm_team(x) for x in (prefer_teams or set()) if x}
 
     prepared = []
@@ -1103,7 +1142,7 @@ def scrape_state(
         href = card.get("href") or ""
         if href.startswith("/"):
             href = urljoin("https://www.maxpreps.com/", href)
-        mascot_a = mascot_b = ""
+        mascot_a = mascot_b = school_class = ""
         game_info = ""
         ck = f"{state}|{team_a}|{team_b}|{mdy}".lower()
         ck_legacy = f"{state}|{team_a}|{team_b}".lower()
@@ -1112,6 +1151,8 @@ def scrape_state(
             mascot_a, mascot_b = cached[0] or "", cached[1] or ""
             if len(cached) >= 3:
                 game_info = cached[2] or ""
+            if len(cached) >= 4:
+                school_class = cached[3] or ""
         idx = len(prepared)
         is_pref = False
         if prefer:
@@ -1135,15 +1176,22 @@ def scrape_state(
         if need_fetch and href:
             # Selalu refresh detail jika belum ada game_info (mascot ikut dari halaman yang sama)
             want_info = with_game_info and not game_info
-            want_mascot = (with_mascots or with_game_info) and not (mascot_a and mascot_b)
+            want_mascot = (with_mascots or with_game_info or style == "game_day") and not (mascot_a and mascot_b)
             if want_info or want_mascot:
                 if is_pref:
                     pending_priority.append(idx)
                 else:
                     pending_normal.append(idx)
 
-    # Prioritas: match Top 25 dulu, baru sisanya sampai limit
-    pending_urls = (pending_priority + pending_normal)[:fetch_limit]
+    # Prioritas: match Top 25 dulu, baru sisanya sampai limit.
+    # game_day / paksa-mascot butuh mascot tiap blok → jangan batasi jumlah fetch.
+    # ponytail: unbounded = 1 request per match (ratusan di mode all-states, lambat).
+    # Batasi lagi hanya kalau kecepatan jadi masalah nyata.
+    pending = pending_priority + pending_normal
+    if with_mascots or style == "game_day":
+        pending_urls = pending
+    else:
+        pending_urls = pending[:fetch_limit]
     cache_updates = {}
 
     def _fetch_one(idx: int):
@@ -1164,20 +1212,21 @@ def scrape_state(
                         results.append(fut.result())
                     except Exception:
                         pass
-        for i, (ma, mb, desc) in results:
+        for i, (ma, mb, desc, school_class) in results:
             if ma or mb:
                 prepared[i]["mascot_a"] = prepared[i]["mascot_a"] or ma
                 prepared[i]["mascot_b"] = prepared[i]["mascot_b"] or mb
             if desc:
                 prepared[i]["game_info"] = desc
+            prepared[i]["school_class"] = school_class
             cache_updates[prepared[i]["ck"]] = [
-                prepared[i]["mascot_a"], prepared[i]["mascot_b"], prepared[i]["game_info"]
+                prepared[i]["mascot_a"], prepared[i]["mascot_b"], prepared[i]["game_info"], school_class
             ]
 
     if cache_updates:
         merge_save_cache(cache_updates)
 
-    blocks: List[str] = []
+    blocks: List[Tuple[str, str]] = []
     for row in prepared:
         if row["game_info"]:
             details = row["game_info"]
@@ -1186,14 +1235,24 @@ def scrape_state(
                 row["team_a"], row["team_b"], row["raw_details"],
                 row["score_a"], row["score_b"],
             )
-        blocks.append(
-            format_match(
-                title, row["team_a"], row["mascot_a"], row["team_b"], row["mascot_b"],
-                tanggal, watch, details, state_name,
-                state_code=state, sport=sport, add_title=add_title,
-            )
-        )
-    return code, url, dedupe_blocks(blocks)
+        blocks.append((row.get("school_class") or "Tidak diketahui", format_match(
+            title, row["team_a"], row["mascot_a"], row["team_b"], row["mascot_b"],
+            tanggal, watch, details, state_name,
+            state_code=state, sport=sport, add_title=add_title,
+            style=style,
+        )))
+    if not group_by_class:
+        return code, url, dedupe_blocks([block for _, block in blocks])
+    grouped: Dict[str, List[str]] = {}
+    for school_class, block in blocks:
+        grouped.setdefault(school_class, []).append(block)
+    grouped_blocks: List[str] = []
+    for school_class in sorted(grouped, key=lambda x: (x == "Tidak diketahui", x)):
+        label = "Kelas tidak diketahui" if school_class == "Tidak diketahui" else f"Kelas {school_class}"
+        section = grouped[school_class]
+        grouped_blocks.append(f"\n{label} — {state_name}\n\n{section[0]}")
+        grouped_blocks.extend(section[1:])
+    return code, url, dedupe_blocks(grouped_blocks)
 
 
 def scrape_states_parallel(
@@ -1210,6 +1269,9 @@ def scrape_states_parallel(
     state_workers: int = 6,
     game_workers: int = 3,
     prefer_teams: Optional[set] = None,
+    style: str = "default",
+    owner: str = "",
+    group_by_class: bool = False,
 ) -> Tuple[List[str], List[str], int, str, List[str]]:
     """Scrape banyak state secara paralel. Returns all_blocks, failed, last_code, last_url, last_blocks."""
     all_blocks: List[str] = []
@@ -1219,12 +1281,13 @@ def scrape_states_parallel(
     lock = __import__("threading").Lock()
 
     def job(st: str):
-        wurl = resolve_watch_url(watch, load_watch_map(), st, sport)
+        wurl = resolve_watch_url(watch, load_watch_map(owner), st, sport)
         return st, scrape_state(
             st, sport, mdy, wurl or WATCH_LIVE_DEFAULT,
             with_mascots, mascot_limit, insecure, add_title=add_title,
             with_game_info=with_game_info, game_info_limit=game_info_limit,
-            game_workers=game_workers, prefer_teams=prefer_teams,
+            game_workers=game_workers, prefer_teams=prefer_teams, style=style,
+            group_by_class=group_by_class,
         )
 
     workers = max(1, min(state_workers, 10))
@@ -1288,6 +1351,8 @@ def main() -> int:
     ap.add_argument("--combined", action="store_true", help="Tulis ke schedules.txt gabungan")
     ap.add_argument("--all-states", action="store_true", help="Scrape semua state")
     ap.add_argument("--no-title", action="store_true", help="Jangan tambah ?title= di watch live")
+    ap.add_argument("--style", default="default", choices=["default", "compact"],
+                    help="Format blok output: default (dengan judul & garis) atau compact")
     args = ap.parse_args()
 
     state = (args.state or "tx").lower()
@@ -1319,6 +1384,7 @@ def main() -> int:
             args.mascots, gi_limit, False, not args.no_title,
             with_game_info=True, game_info_limit=gi_limit,
             state_workers=DEFAULT_STATE_WORKERS, game_workers=DEFAULT_GAME_WORKERS,
+            style=args.style,
         )
         for msg in failed:
             print("[fail]", msg)
@@ -1331,6 +1397,7 @@ def main() -> int:
                 st, args.sport, mdy, wurl, args.mascots, gi_limit,
                 False, add_title=not args.no_title, with_game_info=True,
                 game_info_limit=gi_limit, game_workers=DEFAULT_GAME_WORKERS,
+                style=args.style,
             )
             print(f"[{st}] HTTP {code} {url}  matches={len(blocks)}")
             if code != 200:
