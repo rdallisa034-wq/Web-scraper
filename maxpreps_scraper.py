@@ -586,6 +586,61 @@ def dedupe_blocks(blocks: List[str]) -> List[str]:
     return out
 
 
+def split_file_by_size(path: str, matches_per_file: int = 30) -> List[str]:
+    """Pisah file .txt jadwal jadi beberapa file, masing-masing N match.
+
+    Return list path file yang dibuat. Jika kosong/invalid → [].
+    """
+    if not path or not os.path.isfile(path):
+        return []
+    try:
+        matches_per_file = max(1, int(matches_per_file))
+    except (TypeError, ValueError):
+        matches_per_file = 30
+
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+
+    # Blok dipisah separator garis =====
+    parts = re.split(r"(?=^={10,}\s*$)", text, flags=re.M)
+    blocks = [p for p in parts if p.strip() and "vs" in p.lower()]
+    if not blocks:
+        # fallback: potong per double-newline groups yang berisi vs
+        chunks = re.split(r"\n{2,}", text)
+        blocks = []
+        buf: List[str] = []
+        for ch in chunks:
+            buf.append(ch)
+            joined = "\n\n".join(buf)
+            if "vs" in joined.lower() and "====" in joined:
+                blocks.append(joined if joined.endswith("\n") else joined + "\n")
+                buf = []
+        if buf:
+            joined = "\n\n".join(buf)
+            if joined.strip():
+                blocks.append(joined if joined.endswith("\n") else joined + "\n")
+
+    if not blocks:
+        return []
+
+    base, ext = os.path.splitext(path)
+    if not ext:
+        ext = ".txt"
+    created: List[str] = []
+    total = len(blocks)
+    part = 1
+    for i in range(0, total, matches_per_file):
+        chunk = blocks[i : i + matches_per_file]
+        out_path = f"{base}_part{part:02d}{ext}"
+        with open(out_path, "w", encoding="utf-8") as fh:
+            fh.write("".join(chunk))
+            if not chunk[-1].endswith("\n"):
+                fh.write("\n")
+        created.append(out_path)
+        part += 1
+    return created
+
+
 def write_blocks(path: str, blocks: List[str], overwrite: bool) -> Tuple[int, int]:
     """overwrite=True ganti isi file. False = append, skip duplikat."""
     parent = os.path.dirname(path)
